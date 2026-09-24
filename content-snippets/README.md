@@ -20,8 +20,16 @@ cards are Ghost's actual mechanism for this: they pass their content through
 to the rendered post unsanitized by design (confirmed against
 `koenig/kg-default-nodes/src/nodes/html/html-renderer.ts` and
 `ghost/core/core/server/lib/lexical.js` — the HTML card is Ghost's
-intentional raw-HTML/script escape hatch), so a `<script type="module">`
-inside one runs normally for visitors.
+intentional raw-HTML/script escape hatch), so a `<script>` inside one runs
+normally for visitors.
+
+**Why a classic script, not `type="module"`:** `document.currentScript` is
+`null` inside a module script (verified in real Chrome — it throws
+`Cannot read properties of null` before the scene ever renders), and that's
+how this snippet finds its own container without needing a unique `id`. It
+uses a classic `<script>` with a `{...}`-scoped block instead, capturing
+`document.currentScript.previousElementSibling` synchronously before loading
+Three.js via a dynamic `import()` (which works in classic scripts too).
 
 ### Turn it into a snippet (one-time setup)
 

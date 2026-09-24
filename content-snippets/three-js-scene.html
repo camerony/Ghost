@@ -1,56 +1,65 @@
 <div style="width:100%;aspect-ratio:16/9;border-radius:12px;overflow:hidden;background:#111;"></div>
-<script type="module">
-import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.186.0/build/three.module.js';
+<script>
+{
+  // document.currentScript is null inside <script type="module">, so this
+  // uses a classic script + dynamic import() instead — currentScript must be
+  // captured synchronously, before the async import resolves. The extra
+  // {...} block scopes these bindings so pasting this snippet more than once
+  // on the same page doesn't collide (classic scripts share one global scope,
+  // unlike modules, which are scoped per file).
+  const container = document.currentScript.previousElementSibling;
 
-const container = document.currentScript.previousElementSibling;
-const width = container.clientWidth;
-const height = container.clientHeight;
+  import('https://cdn.jsdelivr.net/npm/three@0.186.0/build/three.module.js').then((THREE) => {
+    const width = container.clientWidth;
+    const height = container.clientHeight;
 
-const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 100);
-camera.position.set(2.5, 2, 3.5);
-camera.lookAt(0, 0, 0);
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 100);
+    camera.position.set(2.5, 2, 3.5);
+    camera.lookAt(0, 0, 0);
 
-const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-renderer.setSize(width, height);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-container.appendChild(renderer.domElement);
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(width, height);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    container.appendChild(renderer.domElement);
 
-const geometry = new THREE.IcosahedronGeometry(1, 0);
-const material = new THREE.MeshStandardMaterial({ color: 0x5865f2, flatShading: true });
-const mesh = new THREE.Mesh(geometry, material);
-scene.add(mesh);
+    const geometry = new THREE.IcosahedronGeometry(1, 0);
+    const material = new THREE.MeshStandardMaterial({ color: 0x5865f2, flatShading: true });
+    const mesh = new THREE.Mesh(geometry, material);
+    scene.add(mesh);
 
-scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-const light = new THREE.DirectionalLight(0xffffff, 1.2);
-light.position.set(4, 5, 3);
-scene.add(light);
+    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+    const light = new THREE.DirectionalLight(0xffffff, 1.2);
+    light.position.set(4, 5, 3);
+    scene.add(light);
 
-let frameId;
-function animate() {
-  frameId = requestAnimationFrame(animate);
-  mesh.rotation.x += 0.004;
-  mesh.rotation.y += 0.006;
-  renderer.render(scene, camera);
+    let frameId;
+    function animate() {
+      frameId = requestAnimationFrame(animate);
+      mesh.rotation.x += 0.004;
+      mesh.rotation.y += 0.006;
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    // Pause when scrolled out of view so idle posts don't burn CPU/battery.
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) {
+        if (!frameId) animate();
+      } else {
+        cancelAnimationFrame(frameId);
+        frameId = null;
+      }
+    });
+    observer.observe(container);
+
+    window.addEventListener('resize', () => {
+      const w = container.clientWidth;
+      const h = container.clientHeight;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+    });
+  });
 }
-animate();
-
-// Pause when scrolled out of view so idle posts don't burn CPU/battery.
-const observer = new IntersectionObserver(([entry]) => {
-  if (entry.isIntersecting) {
-    if (!frameId) animate();
-  } else {
-    cancelAnimationFrame(frameId);
-    frameId = null;
-  }
-});
-observer.observe(container);
-
-window.addEventListener('resize', () => {
-  const w = container.clientWidth;
-  const h = container.clientHeight;
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
-  renderer.setSize(w, h);
-});
 </script>
