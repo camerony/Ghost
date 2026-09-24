@@ -47,16 +47,17 @@ against it and re-apply the admin-build change.
 
 ### MCP server for agent control of Ghost
 
-`mcp-ghost-admin/` is a fork-local MCP server (see its README) that wraps this
-instance's Admin API — posts, pages, tags, members, image uploads, and a
-generic `ghost_admin_request` escape hatch for everything else (tiers,
-newsletters, offers, webhooks, users, settings, themes, ...). It's a
-standalone Node project, deliberately outside the pnpm workspace (uses `npm`,
-not `pnpm` — see its README for why), so it never conflicts with upstream and
-`pnpm`'s workspace tooling never tries to fold it in. It talks to whatever
-Ghost instance `GHOST_ADMIN_API_URL`/`GHOST_ADMIN_API_KEY` point at — not
-necessarily this checkout's dev server — so treat calling its tools as acting
-on a real, possibly-live site, not as a codebase-local operation.
+[`camerony/ghost-mcp-admin`](https://github.com/camerony/ghost-mcp-admin) (a
+separate repo, not part of this monorepo) wraps a Ghost site's Admin API as
+MCP tools — posts, pages, tags, members, image uploads, and a generic
+`ghost_admin_request` escape hatch for everything else (tiers, newsletters,
+offers, webhooks, users, settings, themes, ...). It originated inside this
+fork but was extracted since it has no dependency on this repo's code and is
+used across multiple, unrelated Ghost sites — one registered MCP instance per
+site, each with its own `GHOST_ADMIN_API_URL`/`GHOST_ADMIN_API_KEY`. Treat
+calling its tools as acting on a real, possibly-live site, never as a
+codebase-local operation, and don't assume it's pointed at this checkout's
+dev server.
 
 Start with:
 
