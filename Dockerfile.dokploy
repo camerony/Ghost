@@ -20,6 +20,18 @@
 
 ARG NODE_VERSION=22.23.1
 
+# ghost/core/content/themes/{casper,source} are git submodules (see
+# .gitmodules). Dokploy's git clone doesn't reliably fetch submodules (a
+# long-standing, still-flaky area of Dokploy itself — e.g. Dokploy/dokploy#621),
+# and Docker's own build context excludes .git anyway (.dockerignore), so
+# there's no way to `git submodule update` inside the build even if it did.
+# Fetch them directly instead, pinned to the commits this checkout's
+# submodules point to (`git submodule status`), so the build never depends on
+# the git host's submodule handling. Bump these when intentionally updating
+# either theme.
+ARG CASPER_COMMIT=a3f491463f08d3be5315c516097831b6e9a4724d
+ARG SOURCE_COMMIT=9d3414ec8c2b7f35a8e2e4b5bd09014620f21333
+
 # ---- admin-build: build the Admin UI in-container ----
 # Needs the full workspace install (Admin's nx build fans out across
 # ghost-admin, admin-x-*, shade, and koenig-lexical via nx dependsOn, not
@@ -41,11 +53,26 @@ RUN pnpm nx run @tryghost/admin:build
 # ---- deploy: build closure + self-contained app dir (build-only, not shipped) ----
 FROM node:$NODE_VERSION-bookworm-slim AS deploy
 
+ARG CASPER_COMMIT
+ARG SOURCE_COMMIT
+
 WORKDIR /build
 
 RUN corepack enable
 
 COPY --exclude=ghost/core/core/built . .
+
+# See the CASPER_COMMIT/SOURCE_COMMIT comment near the top of this file: these
+# directories arrive empty (uninitialized git submodules), and ghost/core's
+# `files` field only picks up what's actually inside them, so leaving this out
+# silently produces a `full`/`core` image missing default themes entirely.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/* && \
+    rm -rf ghost/core/content/themes/casper ghost/core/content/themes/source && \
+    mkdir -p ghost/core/content/themes/casper ghost/core/content/themes/source && \
+    curl -fsSL "https://github.com/TryGhost/Casper/archive/${CASPER_COMMIT}.tar.gz" | tar xz --strip-components=1 -C ghost/core/content/themes/casper && \
+    curl -fsSL "https://github.com/TryGhost/Source/archive/${SOURCE_COMMIT}.tar.gz" | tar xz --strip-components=1 -C ghost/core/content/themes/source
 
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store,id=pnpm-store \
     pnpm install --filter "ghost..." --frozen-lockfile --prefer-offline
