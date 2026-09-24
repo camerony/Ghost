@@ -4,6 +4,60 @@ Agent-specific execution guidance for the Ghost monorepo. Human-readable setup,
 workflow, architecture, and practice guidance lives in the
 [codebase documentation](docs/README.md) and nearby package READMEs.
 
+## This is a personal fork
+
+This checkout is a personal fork for individual use, not the canonical
+`TryGhost/Ghost` repository. Two remotes matter:
+
+- `origin` → `camerony/Ghost` (this fork; branches and pushes go here).
+- `upstream` → `TryGhost/Ghost` (the official repo; pull only, never push).
+
+To sync with upstream:
+
+```bash
+git fetch upstream main
+git rebase upstream/main   # or: git merge upstream/main
+```
+
+The repo's own `pnpm main:monorepo` / `pnpm main` script already supports a
+non-canonical origin: it reads `GHOST_UPSTREAM` (defaulting to `origin`) for
+the remote to pull `main` from. Run `GHOST_UPSTREAM=upstream pnpm main` to use
+it instead of the manual `git fetch`/rebase above.
+
+The docs under `docs/contributing/` (workflow, shipping) describe the upstream
+project's contribution and release process and assume `origin` is
+`TryGhost/Ghost` — that assumption does not hold here. Treat their PR/publish
+steps as reference material for how upstream works, not as instructions to
+follow against this fork.
+
+### Deploying to Dokploy
+
+See [`DOKPLOY.md`](DOKPLOY.md) for the step-by-step deployment guide.
+`Dockerfile.dokploy` and `docker-compose.dokploy.yml` are fork-local additions
+for self-hosting this instance on Dokploy — they don't exist upstream, so
+syncing never conflicts with them. Use `Dockerfile.dokploy`, not the upstream
+`Dockerfile.production`, when building a self-contained `full` (server +
+Admin UI) image outside CI: `Dockerfile.production`'s `full` target expects
+Admin to already be built and injected into the build context at
+`ghost/core/core/built/admin` (upstream CI does that in a separate job before
+`docker build`); `Dockerfile.dokploy` adds an in-container stage that builds
+Admin itself, so a plain `docker build` from a git checkout works. If
+`Dockerfile.production`'s stages change upstream, re-diff `Dockerfile.dokploy`
+against it and re-apply the admin-build change.
+
+### MCP server for agent control of Ghost
+
+`mcp-ghost-admin/` is a fork-local MCP server (see its README) that wraps this
+instance's Admin API — posts, pages, tags, members, image uploads, and a
+generic `ghost_admin_request` escape hatch for everything else (tiers,
+newsletters, offers, webhooks, users, settings, themes, ...). It's a
+standalone Node project, deliberately outside the pnpm workspace (uses `npm`,
+not `pnpm` — see its README for why), so it never conflicts with upstream and
+`pnpm`'s workspace tooling never tries to fold it in. It talks to whatever
+Ghost instance `GHOST_ADMIN_API_URL`/`GHOST_ADMIN_API_KEY` point at — not
+necessarily this checkout's dev server — so treat calling its tools as acting
+on a real, possibly-live site, not as a codebase-local operation.
+
 Start with:
 
 - [Development setup](docs/contributing/development-setup.md)

@@ -1,0 +1,80 @@
+# Production compose file for deploying this fork on Dokploy.
+#
+# In Dokploy: create a new "Compose" service, point it at this repository and
+# this file. Dokploy builds the `ghost` service from Dockerfile.dokploy (which
+# builds Admin in-container — see that file's header for why a plain
+# Dockerfile.production build won't work here) and lets you attach a domain to
+# it from the dashboard (Domains tab -> service `ghost`, container port 2368).
+#
+# Required environment variables (set in Dokploy's Environment tab, not
+# committed here): see .env.dokploy.example.
+name: ghost-dokploy
+
+services:
+  ghost:
+    build:
+      context: .
+      dockerfile: Dockerfile.dokploy
+      target: full
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      # Binds inside the container; Dokploy's proxy talks to this port over the
+      # compose network. 127.0.0.1 (Ghost's default) would refuse that connection.
+      server__host: 0.0.0.0
+      server__port: '2368'
+      url: ${GHOST_URL}
+      database__client: mysql
+      database__connection__host: mysql
+      database__connection__port: '3306'
+      database__connection__user: ${MYSQL_USER:-ghost}
+      database__connection__password: ${MYSQL_PASSWORD}
+      database__connection__database: ${MYSQL_DATABASE:-ghost}
+      mail__transport: ${MAIL_TRANSPORT:-Direct}
+      mail__options__host: ${MAIL_HOST}
+      mail__options__port: ${MAIL_PORT}
+      mail__options__auth__user: ${MAIL_USER}
+      mail__options__auth__pass: ${MAIL_PASSWORD}
+      mail__from: ${MAIL_FROM}
+    volumes:
+      - ghost-content:/home/ghost/content
+    healthcheck:
+      test: ['CMD', 'node', '-e', "require('http').get('http://127.0.0.1:2368/ghost/api/admin/site/', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 30s
+      retries: 5
+      timeout: 5s
+      start_period: 60s
+
+  mysql:
+    image: mysql:8.4.11@sha256:85b9bf2e29cf836ecb8c2a15a935d4ba0c606631dff1dd79531a11983c638f2a
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-ghost}
+      MYSQL_USER: ${MYSQL_USER:-ghost}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'mysql',
+          '-h',
+          '127.0.0.1',
+          '-uroot',
+          '-p${MYSQL_ROOT_PASSWORD}',
+          '-e',
+          'SELECT 1',
+        ]
+      interval: 5s
+      retries: 30
+      timeout: 5s
+      start_period: 10s
+
+volumes:
+  ghost-content:
+  mysql-data:
