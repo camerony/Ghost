@@ -33,17 +33,18 @@ follow against this fork.
 ### Deploying to Dokploy
 
 See [`DOKPLOY.md`](DOKPLOY.md) for the step-by-step deployment guide.
-`Dockerfile.dokploy` and `docker-compose.dokploy.yml` are fork-local additions
-for self-hosting this instance on Dokploy — they don't exist upstream, so
-syncing never conflicts with them. Use `Dockerfile.dokploy`, not the upstream
-`Dockerfile.production`, when building a self-contained `full` (server +
-Admin UI) image outside CI: `Dockerfile.production`'s `full` target expects
-Admin to already be built and injected into the build context at
-`ghost/core/core/built/admin` (upstream CI does that in a separate job before
-`docker build`); `Dockerfile.dokploy` adds an in-container stage that builds
-Admin itself, so a plain `docker build` from a git checkout works. If
-`Dockerfile.production`'s stages change upstream, re-diff `Dockerfile.dokploy`
-against it and re-apply the admin-build change.
+`docker-compose.dokploy.yml` is a fork-local addition (it doesn't exist
+upstream, so syncing never conflicts with it). It runs the official `ghost`
+Docker image pinned by tag and digest, not a build of this checkout — this
+fork has no Ghost code changes. Never pin an older Ghost version than the one
+deployed; the database can't be downgraded.
+
+`Dockerfile.dokploy` is kept, unused, for building a self-contained `full`
+(server + Admin + embed renderer) image from source if the fork ever needs
+Ghost code changes. Use it rather than the upstream `Dockerfile.production`,
+whose `full` target expects Admin and the embed renderer to be pre-built and
+injected under `ghost/core/core/built` by CI. If `Dockerfile.production`'s
+stages change upstream, re-diff `Dockerfile.dokploy` against it.
 
 ### MCP server for agent control of Ghost
 

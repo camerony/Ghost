@@ -1,10 +1,13 @@
 # Production compose file for deploying this fork on Dokploy.
 #
 # In Dokploy: create a new "Compose" service, point it at this repository and
-# this file. Dokploy builds the `ghost` service from Dockerfile.dokploy (which
-# builds Admin in-container — see that file's header for why a plain
-# Dockerfile.production build won't work here) and lets you attach a domain to
-# it from the dashboard (Domains tab -> service `ghost`, container port 2368).
+# this file. The `ghost` service runs the official Ghost image (this fork has
+# no Ghost code changes, so there's nothing to build) and you attach a domain
+# to it from the dashboard (Domains tab -> service `ghost`, container port 2368).
+#
+# Upgrading Ghost: bump the tag + digest below to a newer official release and
+# redeploy. Never move to an older version than the one currently deployed —
+# the database will already have that version's migrations applied.
 #
 # Required environment variables (set in Dokploy's Environment tab, not
 # committed here): see .env.dokploy.example.
@@ -12,10 +15,7 @@ name: ghost-dokploy
 
 services:
   ghost:
-    build:
-      context: .
-      dockerfile: Dockerfile.dokploy
-      target: full
+    image: ghost:6.67.0-alpine@sha256:1f7ecf094d54363014636c3540dbe9c368394504abaa283914e4fcf8d699f331
     restart: unless-stopped
     depends_on:
       mysql:
@@ -40,7 +40,7 @@ services:
       mail__options__auth__pass: ${MAIL_PASSWORD}
       mail__from: ${MAIL_FROM}
     volumes:
-      - ghost-content:/home/ghost/content
+      - ghost-content:/var/lib/ghost/content
     healthcheck:
       test: ['CMD', 'node', '-e', "require('http').get('http://127.0.0.1:2368/ghost/api/admin/site/', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"]
       interval: 30s

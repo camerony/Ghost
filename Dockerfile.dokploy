@@ -2,6 +2,10 @@
 
 # Self-contained production Dockerfile for Dokploy (personal-fork deploys).
 #
+# NOT CURRENTLY USED: docker-compose.dokploy.yml runs the official `ghost`
+# image, since this fork has no Ghost code changes. This file is kept for when
+# it does — see DOKPLOY.md, "Building from source".
+#
 # Dockerfile.production's `full` target (server + built Admin UI + embed
 # renderer) expects both to already be built and injected into the build
 # context under ghost/core/core/built — upstream's CI builds Admin in a separate job and
@@ -16,7 +20,6 @@
 # Dockerfile.production after a large upstream Docker-build change.
 #
 # Build (from repo root): docker build -f Dockerfile.dokploy -t ghost-dokploy .
-# Dokploy: point the Application/Compose build at this file, target `full`.
 
 ARG NODE_VERSION=22.23.3
 

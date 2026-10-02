@@ -5,10 +5,11 @@ This is the step-by-step guide for deploying this fork on
 upstream `TryGhost/Ghost` — and pairs with the files it references:
 
 - [`docker-compose.dokploy.yml`](docker-compose.dokploy.yml) — the `ghost` +
-  `mysql` services Dokploy deploys.
-- [`Dockerfile.dokploy`](Dockerfile.dokploy) — builds Admin in-container (see
-  its header comment for why the upstream `Dockerfile.production` can't be
-  used directly here).
+  `mysql` services Dokploy deploys. `ghost` runs the official
+  [`ghost`](https://hub.docker.com/_/ghost) image, pinned to an exact release.
+- [`Dockerfile.dokploy`](Dockerfile.dokploy) — not used by the compose file.
+  Kept for the case where this fork changes Ghost's own code and needs a
+  from-source image (see [Building from source](#building-from-source)).
 - [`.env.dokploy.example`](.env.dokploy.example) — the environment variables
   to set in step 3.
 - [`AGENTS.md`](AGENTS.md#deploying-to-dokploy) — the short agent-facing
@@ -31,11 +32,8 @@ Service** → **Compose**.
 - **Source**: point it at this repository and the branch you deploy from.
 - **Compose file path**: `docker-compose.dokploy.yml`.
 
-Dokploy will build the `ghost` service from `Dockerfile.dokploy`. That build
-compiles the whole monorepo plus Admin in-container, so the first build is
-slow — 10–20+ minutes is normal. Subsequent builds are faster if Dokploy
-caches Docker layers between deploys; a dependency or lockfile change still
-forces a full reinstall layer.
+Dokploy pulls the official Ghost image named in the compose file — there's
+no build step, so a deploy takes about a minute.
 
 ## 2. Set environment variables
 
@@ -45,17 +43,22 @@ In the service's **Environment** tab, set the variables listed in
 | Variable | Notes |
 | --- | --- |
 | `GHOST_URL` | Full public URL, including `https://`. Must match the domain you attach in step 4 — Ghost uses this for canonical URLs, sitemaps, and CORS. |
-| `MYSQL_ROOT_PASSWORD` | Generate one; only MySQL's own bootstrap uses it. |
+| `MYSQL_ROOT_PASSWORD` | Generate one. Used by MySQL's first-run bootstrap and by its healthcheck. |
 | `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` | Ghost's database credentials. Defaults for user/database are `ghost`/`ghost`; always set a real password. |
 | `MAIL_TRANSPORT`, `MAIL_HOST`, `MAIL_PORT`, `MAIL_USER`, `MAIL_PASSWORD`, `MAIL_FROM` | Needed for member signup/magic-link emails. Use a real SMTP provider (Mailgun, etc.) — the `Direct` transport is a placeholder and is not reliable in production. |
 
 Generate real passwords (e.g. `openssl rand -hex 24`); don't reuse the
-examples from `.env.dokploy.example`.
+examples from `.env.dokploy.example`. Avoid `$` in any value — Compose
+treats it as variable interpolation.
+
+The `MYSQL_*` values only take effect on the first deploy, when MySQL
+initialises an empty `mysql-data` volume. Changing them afterwards doesn't
+change the existing database's users or passwords.
 
 ## 3. First deploy
 
-Trigger the deploy from the dashboard. Watch the build logs — `mysql` should
-report healthy first, then `ghost` builds (compile + Admin build) and starts.
+Trigger the deploy from the dashboard. Watch the logs — `mysql` should
+report healthy first, then `ghost` starts and runs any database migrations.
 Once `ghost`'s healthcheck passes, it's serving on container port `2368`.
 
 ## 4. Attach a domain
@@ -73,12 +76,21 @@ Visit `https://<your-domain>/ghost/` — a fresh database opens Ghost's setup
 wizard. Create the owner account there; the compose file defines no default
 credentials.
 
-## 6. Redeploying
+## 6. Upgrading Ghost
 
-Push to the branch Dokploy is watching (if you enabled auto-deploy on push),
-or trigger **Redeploy** from the dashboard. Both rebuild the image from
-scratch via `Dockerfile.dokploy` — there's no separate "just restart" fast
-path for code changes, only for picking up new environment variable values.
+The Ghost version is pinned in `docker-compose.dokploy.yml` by tag and
+digest (`ghost:<version>-alpine@sha256:...`), so redeploying never upgrades
+Ghost by itself. To upgrade:
+
+1. Pick a newer release from the
+   [`ghost` tags on Docker Hub](https://hub.docker.com/_/ghost/tags) and get
+   its `-alpine` digest.
+2. Update the `image:` line, commit, and push (or **Redeploy** from the
+   dashboard). Ghost runs its database migrations on start.
+
+Never pin an older version than the one currently deployed: the database
+already has that version's migrations, and Ghost doesn't support
+downgrading. Back up both volumes before a major-version upgrade.
 
 ## Persistent data and backups
 
@@ -95,14 +107,29 @@ backup means losing the site's content or its data respectively.
 
 ## Troubleshooting
 
-- **Build fails partway through the `admin-build` stage**: usually a
-  workspace install or Nx graph issue unrelated to Dokploy itself — try the
-  same build locally first: `docker build -f Dockerfile.dokploy --target full
-  -t ghost-dokploy-test .` from the repo root, which reproduces exactly what
-  Dokploy runs.
 - **`ghost` never reports healthy**: check its logs for a database connection
   error first (wrong `MYSQL_*` values, or `mysql` not yet healthy — `ghost`
   is configured to wait on `mysql`'s healthcheck, but a slow first MySQL
   bootstrap can still race it on underpowered hosts).
 - **Emails never arrive**: confirm `MAIL_TRANSPORT`/`MAIL_HOST`/etc. are set
   to a real provider, not left as `Direct`.
+
+## Building from source
+
+This fork has no changes to Ghost's code, so the official image is the same
+Ghost. If that changes, [`Dockerfile.dokploy`](Dockerfile.dokploy) builds a
+self-contained image from this checkout (server, Admin, and embed renderer,
+all built in-container). Swap the `ghost` service's `image:` line for:
+
+```yaml
+    build:
+      context: .
+      dockerfile: Dockerfile.dokploy
+      target: full
+```
+
+and mount `ghost-content` at `/home/ghost/content` instead of
+`/var/lib/ghost/content`. Expect 10–20+ minute builds. The from-source build
+tracks upstream `main`, which is usually ahead of the latest official
+release — once deployed, you can't switch back to an official image until a
+release catches up with it.
