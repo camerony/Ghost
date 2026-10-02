@@ -136,6 +136,8 @@ The publishing check runs for admins only, since nobody else can read the member
 
 Both blocks feed the state directly. An email block disables the email publish types and re-applies the initial-type rules, so the selection falls back to `publish`; that demotion also applies to a type the user picked before the block landed, since a block that arrives late must not leave an unsendable type selected.
 
+The editor supplies the ports through `usePublishLimits()`, which backs them with the framework's limiter and the editor's settings and config reads. The limiter loads only the two limits the flow checks (`members` and `emails` under the host's `hostSettings.limits`), so opening the editor never reads the staff lists the other limits count. `refreshSettings` refetches the site settings and rejects when that read fails; `checkSendingLimit` asks the limiter whether one more send would exceed the monthly `emails` limit, counting the recipients of every email created since the period started; `checkPublishingLimit` asks whether the site is already over its `members` limit; and `getEmailVerification` reads `email_verification_required` from the refreshed settings, with the host's `hostSettings.emailVerification.emailSendingDisabledMessage` as its copy. A site without a limit configured, or one whose limiter has not loaded, passes every check. The ports read the latest hook values each time they run, so the machine can capture them once at creation.
+
 ## Dirty state and reset
 
 `isDirty` compares the publish type, scheduling, newsletter and recipient filter against the values the machine started with; selecting the value that was already there is not a change. The scheduled time counts only while scheduling is on or the user has actually chosen a time, so turning scheduling on and back off leaves the state clean.
@@ -149,6 +151,10 @@ Both blocks feed the state directly. An email block disables the email publish t
 It is self-contained: the caller supplies the post projection, the site and user inputs, the site timezone and a `dispatch` function, and gets back a flow that publishes. The caller passes the save engine's `dispatch` unchanged; the modal never touches the engine, the editor session or the router. `usePublishInputs()` assembles the site and user inputs from the API for callers that have no better source.
 
 The stateful journey is keyed by post id. If a mounted caller replaces the post, the gates, options machine, limits readiness, failures and completion state all start again for the new post.
+
+## Opening the flow
+
+The flow opens at its email-failure step for a published or sent post whose email failed, and at the options step for anything else. `initialEmailError()` is that test, exported so a caller can tell whether opening the flow leads to a retry. A caller must not open the flow before `usePublishInputs()` reports the inputs ready: the machine is built from them once.
 
 ## Steps
 
@@ -171,16 +177,16 @@ Two interstitials can stand in front of the flow. A post with unresolved TK mark
 
 Confirming runs `onBeforePublish` (the editor's pre-save cleanup), dispatches the command from `toDispatch()`, and branches on the [completion](../engine/README.md#queue-semantics) the engine returns:
 
-| Completion              | Result                                                              |
-| ----------------------- | ------------------------------------------------------------------- |
-| `saved`                 | The email confirmation runs when the publish emails immediately     |
-| `needs-retry`           | Back to confirm with the re-auth message; the user retries in place |
-| `failed` (`conflict`)   | The collision message, in place                                     |
-| `failed` (`host-limit`) | The host's message, with the upgrade phrase rendered as a link      |
-| `failed` (`validation`) | The validation message, in place                                    |
-| `dropped`/`superseded`  | The post is no longer publishable from here                         |
+| Completion              | Result                                                             |
+| ----------------------- | ------------------------------------------------------------------ |
+| `saved`                 | The email confirmation runs when the publish emails immediately    |
+| `needs-retry`           | Back to confirm, told the session is back; the user confirms again |
+| `failed` (`conflict`)   | The collision message, in place                                    |
+| `failed` (`host-limit`) | The host's message, with the upgrade phrase rendered as a link     |
+| `failed` (`validation`) | The validation message, in place                                   |
+| `dropped`/`superseded`  | The post is no longer publishable from here                        |
 
-No completion closes the modal or navigates. Reaching the complete step writes the celebration handoff (`ghost-last-published-post` or `ghost-last-scheduled-post`), and calls `onCompleted` so the caller can navigate; where the user lands is the caller's decision, not this component's.
+No completion closes the modal or navigates. Successful completion writes the celebration handoff (`ghost-last-published-post` or `ghost-last-scheduled-post`), and calls `onCompleted` so the caller can navigate; where the user lands is the caller's decision, not this component's. The editor sets `showCompletion={false}` to keep the current step pending until navigation unmounts it, avoiding a flash of the fallback completion screen while the destination loads. Other callers show the completion screen by default.
 
 ## Email confirmation
 
@@ -192,9 +198,11 @@ A reload that throws — a transport failure, or the 401 the redirect opt-out be
 
 The email's id is only knowable from a reload, so the poller's reload records it for the retry. For the same reason the flow polls rather than short-circuiting on a known email: the acknowledged save result carries no email, and the pre-save one would resolve the confirmation to "not needed" immediately. Closing the flow cancels the poll and marks every pending pre-save, save, confirmation and retry continuation as abandoned, so none can complete the post journey after the caller closes it.
 
+The poller reads the post around the query cache, so the cached post reads never see what it found. Once a confirmation settles with any outcome but `cancelled`, after a publish or a retry, the flow invalidates the post reads so whatever is drawn from them catches up with the send. A reload that throws leaves them alone, since a refetch would most likely fail the same way.
+
 ## Requests
 
-Every request the flow makes passes the editor's shared request options, which opt out of the transport's session-expiry redirect: the two it issues directly (the poller's reload and the published-post count), the settings, config, newsletter, tier, label and recipient-count reads behind its hooks, and the email retry, which carries the same flag on its mutation payload. An expired session is left to surface where the user is — as an uncounted audience, a note on the complete step, or an error on the email-error step.
+Every request the flow makes passes the editor's shared request options, which opt out of the transport's session-expiry redirect: the two it issues directly (the poller's reload and the published-post count), the settings, config, newsletter, tier, label and recipient-count reads behind its hooks, the member and email counts the limit ports read through the limiter, and the email retry, which carries the same flag on its mutation payload. An expired session is left to surface where the user is — as an uncounted audience, a note on the complete step, or an error on the email-error step.
 
 The poller is the most important case: it fires once a second immediately after a save, over an editor that may still hold unsaved work, so a single 401 must not navigate away and lose it.
 
@@ -218,4 +226,4 @@ That reading depends on what the caller supplies. `newsletterName` and `newslett
 
 ## Not here yet
 
-Known gaps, listed so they are not mistaken for decisions: the size of a newsletter is not shown, so a send over the 100kB clipping threshold goes unflagged even though the options step keeps the slot the warning belongs in; and the host limit ports are optional and unset, so `checkLimits()` finds no blocks unless a caller supplies them.
+Known gaps, listed so they are not mistaken for decisions: the size of a newsletter is not shown, so a send over the 100kB clipping threshold goes unflagged even though the options step keeps the slot the warning belongs in.

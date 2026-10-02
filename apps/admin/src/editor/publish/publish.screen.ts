@@ -1,5 +1,6 @@
 import { page } from 'vitest/browser';
 import {
+  chooseDateButton,
   publicPreviewWarningDialog,
   publishAlreadySent,
   publishBackToSettings,
@@ -18,6 +19,7 @@ import {
   publishRetryEmail,
   publishRevertToDraft,
   publishScheduleDate,
+  publishScheduleTime,
   publishSettingEmailRecipients,
   publishSettingPublishAt,
   publishSettingPublishType,
@@ -37,6 +39,8 @@ const SETTINGS = {
 /** Publish and update flow locators and gestures for acceptance specs; no assertions. */
 export const publishScreen = {
   root: () => page.getByTestId(publishFlowModal),
+  closeButton: () =>
+    page.getByTestId(publishFlowModal).getByRole('button', { name: 'Close', exact: true }),
   options: () => page.getByTestId(publishFlowOptions),
   confirm: () => page.getByTestId(publishFlowConfirm),
   complete: () => page.getByTestId(publishFlowComplete),
@@ -45,6 +49,11 @@ export const publishScreen = {
   /** The collapsed row's toggle button. */
   setting: (name: keyof typeof SETTINGS) => page.getByTestId(SETTINGS[name]).getByRole('button'),
   scheduleDate: () => page.getByTestId(publishScheduleDate),
+  scheduleCalendarButton: () =>
+    page
+      .getByTestId(publishSettingPublishAt)
+      .getByRole('button', { name: chooseDateButton, exact: true }),
+  scheduleTime: () => page.getByTestId(publishScheduleTime),
   continueButton: () => page.getByTestId(publishContinue),
   previewButton: () => page.getByTestId(publishFlowPreview),
   recipientFree: () => page.getByTestId(publishRecipientFree),

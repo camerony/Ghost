@@ -4,7 +4,6 @@ import AuthConfiguration from 'ember-simple-auth/configuration';
 import React from 'react';
 import ReactDOM from 'react-dom';
 import Route from '@ember/routing/route';
-import SearchModal from '../components/modals/search';
 import ShortcutsRoute from 'ghost-admin/mixins/shortcuts-route';
 import ctrlOrCmd from 'ghost-admin/utils/ctrl-or-cmd';
 import windowProxy from 'ghost-admin/utils/window-proxy';
@@ -103,7 +102,6 @@ const shortcuts = {};
 
 shortcuts.esc = {action: 'closeMenus', scope: 'default'};
 shortcuts[`${ctrlOrCmd}+s`] = {action: 'save', scope: 'all'};
-shortcuts[`${ctrlOrCmd}+k`] = {action: 'openSearchModal'};
 shortcuts[`${ctrlOrCmd}+,`] = {action: 'openSettings'};
 
 // make globals available for any pulled in UMD components
@@ -125,7 +123,6 @@ export default Route.extend(ShortcutsRoute, {
     stateBridge: service(),
     ui: service(),
     billing: service(),
-    modals: service(),
 
     shortcuts,
 
@@ -178,7 +175,7 @@ export default Route.extend(ShortcutsRoute, {
 
             // Need a tiny delay here to allow the router to update to the current route
             later(() => {
-                Sentry.setTag('route', this.router.currentRouteName);
+                this.stateBridge.tagSentryRoute();
             }, 2);
         },
 
@@ -242,20 +239,10 @@ export default Route.extend(ShortcutsRoute, {
             return true;
         },
 
-        openSearchModal() {
-            // Don't open the search modal if the sidebar is hidden
-            // e.g. in the editor or settings screens
-            if (this.ui.isFullScreen) {
-                return;
-            }
-
-            return this.modals.open(SearchModal);
-        },
-
         openSettings() {
             // Don't open the settings screen if the sidebar is hidden
             // e.g. in the editor or settings screens
-            if (this.ui.isFullScreen) {
+            if (this.ui.isFullScreen || this.stateBridge.isReactFullScreen) {
                 return;
             }
 

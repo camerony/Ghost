@@ -1,6 +1,6 @@
 {
   "name": "@tryghost/admin",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -24,7 +24,9 @@
     "@codemirror/search": "catalog:",
     "@codemirror/state": "catalog:",
     "@codemirror/theme-one-dark": "catalog:",
+    "@dnd-kit/core": "catalog:",
     "@dnd-kit/sortable": "catalog:",
+    "@dnd-kit/utilities": "catalog:",
     "@radix-ui/react-focus-guards": "catalog:",
     "@radix-ui/react-focus-scope": "catalog:",
     "@sentry/react": "catalog:",
@@ -38,6 +40,7 @@
     "@tryghost/custom-fonts": "catalog:",
     "@tryghost/i18n": "workspace:*",
     "@tryghost/kg-clean-basic-html": "workspace:*",
+    "@tryghost/kg-converters": "workspace:*",
     "@tryghost/kg-unsplash-selector": "workspace:*",
     "@tryghost/koenig-lexical": "workspace:*",
     "@tryghost/metafield-types": "workspace:*",
@@ -52,11 +55,11 @@
     "clsx": "catalog:",
     "dequal": "catalog:",
     "dompurify": "catalog:",
+    "flexsearch": "catalog:",
     "i18n-iso-countries": "7.14.0",
     "jszip": "3.10.1",
     "lucide-react": "catalog:",
     "luxon": "catalog:",
-    "microdiff": "catalog:",
     "mingo": "catalog:",
     "moment": "catalog:",
     "moment-timezone": "catalog:",
@@ -89,6 +92,7 @@
     "@typescript/native": "catalog:",
     "@vitejs/plugin-react": "catalog:",
     "@vitest/browser-playwright": "catalog:",
+    "d3-geo": "catalog:",
     "eslint": "catalog:",
     "eslint-plugin-no-relative-import-paths": "1.6.1",
     "ghost-admin": "workspace:*",
@@ -155,7 +159,8 @@
         ],
         "outputs": [
           "{projectRoot}/dist",
-          "{workspaceRoot}/ghost/core/core/built/admin"
+          "{workspaceRoot}/ghost/core/core/built/admin",
+          "{workspaceRoot}/ghost/core/core/built/embed-renderer"
         ],
         "dependsOn": [
           "^build",
@@ -173,6 +178,7 @@
             "projects": [
               "@tryghost/admin-x-framework",
               "@tryghost/checkout",
+              "@tryghost/kg-converters",
               "@tryghost/metafield-types",
               "@tryghost/shade"
             ],

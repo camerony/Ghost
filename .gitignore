@@ -145,6 +145,7 @@ Caddyfile
 
 # Admin
 /apps/ember-admin/dist
+/apps/admin/test-results/
 
 # Admin Toolbar
 /apps/admin-toolbar/umd

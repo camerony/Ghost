@@ -6,7 +6,9 @@ import {
   LOADED_AT,
   record,
   sessionHarness,
+  type HarnessHooks,
 } from '@/editor/session/__test-utils__/session-harness';
+import { TITLE_MAX, TITLE_TOO_LONG } from './settings-fields';
 
 describe('createEditorSession', () => {
   it('loads a post clean and dirties it on the first edit', () => {
@@ -152,7 +154,32 @@ describe('createEditorSession', () => {
     });
   });
 
-  it('rolls back a restore when reauthentication would wait behind the history modal', async () => {
+  it('holds a restore for re-authentication and lands it once the session is back', async () => {
+    const hooks: HarnessHooks = {
+      failUpdateWith: new SessionExpiredError(new Response(null, { status: 401 }), undefined),
+    };
+    const { session, state } = sessionHarness({ record: record() }, hooks);
+    const restored = session.restoreRevision({
+      lexical: buildLexicalParagraph('Older words'),
+      title: 'Older title',
+      custom_excerpt: null,
+      feature_image: null,
+      feature_image_alt: null,
+      feature_image_caption: null,
+    });
+    await expect.poll(() => session.getState().kind).toBe('reauth-pending');
+    expect(session.getFields().title).toBe('Older title');
+
+    hooks.failUpdateWith = undefined;
+    session.reauthSucceeded();
+
+    expect(await restored).toBe(true);
+    expect(state.updates).toHaveLength(2);
+    expect(state.updates[1].payload.title).toBe('Older title');
+    expect(session.getSaveSnapshot().isDirty).toBe(false);
+  });
+
+  it('rolls back a restore when re-authentication is abandoned', async () => {
     const { session } = sessionHarness(
       { record: record() },
       { failUpdateWith: new SessionExpiredError(new Response(null, { status: 401 }), undefined) },
@@ -165,8 +192,12 @@ describe('createEditorSession', () => {
       feature_image_alt: null,
       feature_image_caption: null,
     });
-    await expect.poll(() => session.getState().kind).toBe('error');
+    await expect.poll(() => session.getState().kind).toBe('reauth-pending');
+
+    session.reauthAbandoned();
+
     expect(await restored).toBe(false);
+    expect(session.getState().kind).toBe('error');
     expect(session.getFields().title).toBe('Hello');
     expect(session.getLiveLexical()).toBe(record().lexical);
   });
@@ -193,6 +224,66 @@ describe('createEditorSession', () => {
     // The request carried the default title, but the writer moved past it.
     expect(built.state.creates[0].title).toBe('(Untitled)');
     expect(session.getSaveSnapshot().isDirty).toBe(true);
+  });
+
+  it.each([
+    ['only added whitespace', 'Hello ', 'Hello, world', false],
+    ['typed more than whitespace', 'Hello!', 'Hello!', true],
+  ])(
+    'adopts the server title only when the writer %s in flight',
+    async (_case, typed, title, isDirty) => {
+      const built = sessionHarness(
+        { record: record({ title: 'Hello' }) },
+        {
+          duringSave: () => built.session.patchTitle(typed),
+          acknowledge: (next) => ({ ...next, title: 'Hello, world' }),
+        },
+      );
+      const { session } = built;
+
+      session.setBaseline(record().lexical);
+      session.patchLexical(body('Edited'));
+      await session.dispatchExplicit();
+
+      expect(session.getSaveSnapshot()).toMatchObject({ title, isDirty });
+    },
+  );
+
+  it('overwrites the input with a server-trimmed title', async () => {
+    const { session } = sessionHarness(
+      { record: record({ title: 'Hello' }) },
+      { acknowledge: (next) => ({ ...next, title: next.title.trim() }) },
+    );
+
+    session.setBaseline(record().lexical);
+    session.patchTitle('Hello ');
+    session.patchLexical(body('Edited'));
+    await session.dispatchExplicit();
+
+    expect(session.getSaveSnapshot()).toMatchObject({
+      title: 'Hello',
+      isDirty: false,
+      titleDirty: false,
+    });
+  });
+
+  it('holds a title past the limit from a field save and refuses an explicit one', async () => {
+    const { session, state } = sessionHarness({ record: record() });
+
+    session.patchTitle('a'.repeat(TITLE_MAX + 1));
+    session.commitField();
+    await new Promise((resolve) => {
+      setTimeout(resolve, 0);
+    });
+
+    expect(session.getView().pendingSave).toMatchObject({
+      blockedBy: { kind: 'validation', message: TITLE_TOO_LONG },
+    });
+    expect(await session.dispatchExplicit()).toMatchObject({
+      kind: 'failed',
+      error: { kind: 'validation', message: TITLE_TOO_LONG },
+    });
+    expect(state.updates).toHaveLength(0);
   });
 
   it('leaves tags out of the payload so edits elsewhere survive', async () => {

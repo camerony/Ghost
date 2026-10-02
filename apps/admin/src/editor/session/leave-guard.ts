@@ -1,3 +1,4 @@
+import { withoutTrailingSlash } from '@/hooks/use-history-pop-navigation-guard';
 import type { SaveEngineState } from '@/editor/engine/save-engine';
 import type { PostType } from '@/editor/card-config';
 
@@ -17,14 +18,17 @@ export function hasUnsavedWork(state: SaveEngineState, isDirty: boolean): boolea
     return true;
   }
   return (
-    state.kind === 'saving' || state.kind === 'pending-coalesced' || state.kind === 'reauth-pending'
+    state.kind === 'preparing' ||
+    state.kind === 'saving' ||
+    state.kind === 'pending-coalesced' ||
+    state.kind === 'reauth-pending'
   );
 }
 
 /**
  * Whether a navigation is the session's own URL replace after a create rather
- * than a writer leaving: `/editor/post` to `/editor/post/:id`, carrying the
- * session key so the same session survives the swap.
+ * than a writer leaving: `/editor/post` (with or without its trailing slash) to
+ * `/editor/post/:id`, carrying the session key so the same session survives the swap.
  */
 export function isCreatedIdUrlSwap(
   current: GuardedLocation,
@@ -33,7 +37,10 @@ export function isCreatedIdUrlSwap(
   sessionKey: string,
 ): boolean {
   const newPath = `/editor/${postType}`;
-  if (current.pathname !== newPath || !next.pathname.startsWith(`${newPath}/`)) {
+  if (
+    withoutTrailingSlash(current.pathname) !== newPath ||
+    !next.pathname.startsWith(`${newPath}/`)
+  ) {
     return false;
   }
   const id = next.pathname.slice(newPath.length + 1);
