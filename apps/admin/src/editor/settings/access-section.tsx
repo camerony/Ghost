@@ -1,6 +1,5 @@
 import { useEffect, useId } from 'react';
 import {
-  Checkbox,
   FieldError,
   Label,
   Select,
@@ -9,14 +8,18 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@tryghost/shade/components';
-import { Inline, Stack, Text } from '@tryghost/shade/primitives';
+import { Stack } from '@tryghost/shade/primitives';
+import { LucideIcon } from '@tryghost/shade/utils';
 import { getSettingValue } from '@tryghost/admin-x-framework/api/settings';
 import { useBrowseTiers } from '@tryghost/admin-x-framework/api/tiers';
 import {
+  settingsTierChip,
   settingsTiersError,
+  settingsTiersList,
   settingsTiersPicker,
   settingsVisibilitySelect,
 } from '@tryghost/test-data/selectors/editor';
+import { ChipPicker } from '@/shared/pickers/chip-picker';
 import type { PostType } from '@/editor/card-config';
 import { PAID_TIERS_SEARCH_PARAMS } from '@/editor/browse-params';
 import { useEditorSettings } from '@/editor/use-editor-settings';
@@ -31,6 +34,7 @@ import { SectionLoadError } from './section-load-error';
 import { SettingsSection } from './settings-section';
 import {
   VISIBILITY_OPTIONS,
+  defaultTierIds,
   postTiers,
   selectedTierIds,
   selectedVisibility,
@@ -38,57 +42,6 @@ import {
   tiersFromSelection,
   type TierOption,
 } from './access-options';
-
-function TierCheckbox({
-  option,
-  checked,
-  onToggle,
-}: {
-  option: TierOption;
-  checked: boolean;
-  onToggle: () => void;
-}) {
-  const inputId = useId();
-
-  return (
-    <Inline gap="sm">
-      <Checkbox checked={checked} id={inputId} onCheckedChange={onToggle} />
-      <Label htmlFor={inputId}>{option.name}</Label>
-    </Inline>
-  );
-}
-
-function TierGroup({
-  heading,
-  options,
-  selected,
-  onToggle,
-}: {
-  heading: string;
-  options: TierOption[];
-  selected: ReadonlySet<string>;
-  onToggle: (id: string) => void;
-}) {
-  if (options.length === 0) {
-    return null;
-  }
-
-  return (
-    <Stack gap="sm">
-      <Text size="sm" tone="secondary" weight="medium">
-        {heading}
-      </Text>
-      {options.map((option) => (
-        <TierCheckbox
-          key={option.id}
-          checked={selected.has(option.id)}
-          option={option}
-          onToggle={() => onToggle(option.id)}
-        />
-      ))}
-    </Stack>
-  );
-}
 
 export interface AccessSectionProps {
   session: EditorSettingsPort;
@@ -108,9 +61,21 @@ export function AccessSection({ session, postType }: AccessSectionProps) {
     settingsData?.settings ?? null,
     'default_content_visibility',
   );
+  const defaultContentVisibilityTiers = getSettingValue<string>(
+    settingsData?.settings ?? null,
+    'default_content_visibility_tiers',
+  );
 
   const visibility = selectedVisibility(session.settings.visibility, defaultContentVisibility);
-  const selected = new Set(selectedTierIds(session.settings.tiers));
+  // Core grants a new post the default's tiers on create, so they stand in until
+  // the post has a visibility of its own, and a tier pick starts from them.
+  const followsDefaultTiers =
+    isNewPost(session) && !session.settings.visibility && visibility === 'tiers';
+  const selected = new Set(
+    followsDefaultTiers
+      ? defaultTierIds(defaultContentVisibilityTiers)
+      : selectedTierIds(session.settings.tiers),
+  );
   const tiersMissing = tiersIncomplete(session.settings);
 
   const {
@@ -118,6 +83,7 @@ export function AccessSection({ session, postType }: AccessSectionProps) {
     fetchNextPage,
     hasNextPage,
     isError: tiersFailed,
+    isFetching: tiersFetching,
     isFetchingNextPage,
     refetch: refetchTiers,
   } = useBrowseTiers({
@@ -135,6 +101,8 @@ export function AccessSection({ session, postType }: AccessSectionProps) {
     }
   }, [fetchNextPage, hasNextPage, isFetchingNextPage, tiersFailed]);
   const options = hasNextPage ? [] : tierOptions(tiersData?.tiers);
+  // A selected tier the browse has not named yet has no chip to draw until it does.
+  const selectedOptions = options.filter((option) => selected.has(option.id));
 
   // An incomplete pair is left out of every write. On a post the server has not
   // created yet it is staged without a save of its own: that write would carry nothing.
@@ -185,31 +153,38 @@ export function AccessSection({ session, postType }: AccessSectionProps) {
       </Select>
 
       {visibility === 'tiers' ? (
-        <Stack
-          aria-describedby={tiersMissing ? tiersErrorId : undefined}
-          aria-invalid={tiersMissing}
-          aria-label="Tiers"
-          data-testid={settingsTiersPicker}
-          gap="md"
-          role="group"
-        >
+        <Stack data-settings-field="tiers" gap="sm">
+          {/* The chips are drawn from the browse, so without it the field could only
+              show an empty selection; the failure stands in its place. */}
           {tiersFailed ? (
             <SectionLoadError message="Couldn’t load tiers." onRetry={() => void refetchTiers()} />
           ) : (
-            <>
-              <TierGroup
-                heading="Active tiers"
-                options={options.filter((option) => !option.archived)}
-                selected={selected}
-                onToggle={toggleTier}
-              />
-              <TierGroup
-                heading="Archived tiers"
-                options={options.filter((option) => option.archived)}
-                selected={selected}
-                onToggle={toggleTier}
-              />
-            </>
+            <ChipPicker<TierOption, TierOption>
+              describedBy={tiersMissing ? tiersErrorId : undefined}
+              emptyMessage={tiersFetching || hasNextPage ? 'Loading tiers...' : 'No tiers found'}
+              getGroup={(option) => (option.archived ? 'Archived tiers' : 'Active tiers')}
+              getKey={(option) => option.id}
+              getLabel={(option) => option.name}
+              inputLabel="Tiers"
+              invalid={tiersMissing}
+              matches={(option, term) => option.name.toLowerCase().includes(term.toLowerCase())}
+              options={options}
+              placeholder="Select tiers..."
+              renderOption={(option, { chosen }) => (
+                <>
+                  <span className="truncate">{option.name}</span>
+                  {chosen && <LucideIcon.Check className="ms-auto size-4 shrink-0 text-primary" />}
+                </>
+              )}
+              selected={selectedOptions}
+              testIds={{
+                field: settingsTiersPicker,
+                list: settingsTiersList,
+                chip: settingsTierChip,
+              }}
+              onAdd={(option) => toggleTier(option.id)}
+              onRemove={toggleTier}
+            />
           )}
           {tiersMissing ? (
             <FieldError data-testid={settingsTiersError} id={tiersErrorId}>

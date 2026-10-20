@@ -11,6 +11,7 @@ import {
   fakeTags,
   post,
   renderAdminApp,
+  settleTransitions,
   staffRole,
   submittedPost,
   tag,
@@ -22,7 +23,6 @@ import { editorScreen } from '@/editor/editor.screen';
 
 const POST_ID = 'abc123';
 const CURRENT_USER_ID = '1';
-const FLAG_ON = withoutAutosave({ labs: { editorReact: true } });
 const LOADED_AT = '2026-01-01T00:00:00.000Z';
 const PUBLISHED_AT = '2025-12-01T10:00:00.000Z';
 const ROUTE = new RegExp(`^/posts/${POST_ID}/\\?`);
@@ -38,6 +38,11 @@ const NOTICE = tag({ id: 'tag3', name: 'Notice', slug: 'notice', visibility: 'pu
 // Same name, different tag: what tells them apart is the id, not what they read as.
 const NEWS_2 = tag({ id: 'tag4', name: 'News', slug: 'news-2', visibility: 'public' });
 const SITE_TAGS = [NEWS, SPORT, NOTICE, NEWS_2];
+// More than the hundred tags one page of the browse holds.
+const PAGED_TAGS = tag.many(150, (index) => {
+  const number = String(index + 1).padStart(3, '0');
+  return { name: `Tag ${number}`, slug: `tag-${number}` };
+});
 
 function submittedTags(capture: EndpointCapture): Array<Record<string, unknown>> {
   return (submittedPost(capture).tags ?? []) as Array<Record<string, unknown>>;
@@ -103,12 +108,14 @@ function fakeTaggablePost(overrides: Partial<SavedPost> = {}, siteTags: SavedTag
 function asRole(name: StaffRoleName) {
   const me = currentUserResponse();
   me.users[0].roles = [staffRole({ name })];
-  return { ...FLAG_ON, boot: { browseMe: { response: me } } };
+  return withoutAutosave({ boot: { browseMe: { response: me } } });
 }
 
 async function openSidebar() {
   await editorScreen.settingsToggle().click();
   await expect.element(editorScreen.settingsSidebar()).toBeVisible();
+  // Visible from its first frame; a click while it still slides in can be lost.
+  await settleTransitions();
 }
 
 async function openTagList() {
@@ -123,7 +130,7 @@ describe('Post settings tags', () => {
   it('adds an existing tag to a draft and saves the relation in order', async () => {
     const { saveApi } = fakeTaggablePost({ tags: [NEWS] });
     const tagsApi = fakeTags([NEWS, SPORT]);
-    await renderAdminApp(`/editor/post/${POST_ID}`, FLAG_ON);
+    await renderAdminApp(`/editor/post/${POST_ID}`, withoutAutosave());
     await openSidebar();
     await openTagList();
 
@@ -141,7 +148,7 @@ describe('Post settings tags', () => {
     const renamed = tag({ id: 'tag1', name: 'Breaking News', slug: 'news' });
     const { saveApi } = fakeTaggablePost({ tags: [NEWS] }, [renamed, SPORT]);
     fakeTags([renamed, SPORT]);
-    await renderAdminApp(`/editor/post/${POST_ID}`, FLAG_ON);
+    await renderAdminApp(`/editor/post/${POST_ID}`, withoutAutosave());
     await openSidebar();
     await openTagList();
 
@@ -161,12 +168,13 @@ describe('Post settings tags', () => {
       tags: [NEWS],
     });
     fakeTags([NEWS, NEWS_2]);
-    await renderAdminApp(`/editor/post/${POST_ID}`, FLAG_ON);
+    await renderAdminApp(`/editor/post/${POST_ID}`, withoutAutosave());
     await openSidebar();
 
     await editorScreen.removeSettingsTag('News').click();
     await openTagList();
-    await editorScreen.settingsTagOption(/news-2/).click();
+    // The rows read the same; the second is the other tag, in the order the site holds them.
+    await editorScreen.settingsTagOption('News').nth(1).click();
 
     await expect.poll(() => submittedTags(saveApi), POLL).toEqual([{ id: 'tag4' }]);
     await expect.element(editorScreen.updateButton()).toBeDisabled();
@@ -176,7 +184,7 @@ describe('Post settings tags', () => {
     const { saveApi } = fakeTaggablePost();
     fakeTags([NEWS]);
     const tagsApi = fakeAdminEndpoint('POST', '/tags/', { tags: [] });
-    await renderAdminApp(`/editor/post/${POST_ID}`, FLAG_ON);
+    await renderAdminApp(`/editor/post/${POST_ID}`, withoutAutosave());
     await openSidebar();
     await openTagList();
 
@@ -193,7 +201,7 @@ describe('Post settings tags', () => {
   it('refetches the site’s tags once a save has created one', async () => {
     const { saveApi } = fakeTaggablePost();
     const tagsApi = fakeTags([NEWS]);
-    await renderAdminApp(`/editor/post/${POST_ID}`, FLAG_ON);
+    await renderAdminApp(`/editor/post/${POST_ID}`, withoutAutosave());
     await openSidebar();
     await openTagList();
 
@@ -209,10 +217,42 @@ describe('Post settings tags', () => {
     await expect.poll(() => tagsApi.requests.length, POLL).toBeGreaterThan(browsesBefore);
   });
 
+  it('loads the next page of tags once the list is scrolled to its end', async () => {
+    fakeTaggablePost();
+    const tagsApi = fakeTags(PAGED_TAGS);
+    await renderAdminApp(`/editor/post/${POST_ID}`, withoutAutosave());
+    await openSidebar();
+    await openTagList();
+    await expect(editorScreen.settingsTagOptions()).toHaveCount(100);
+
+    editorScreen.scrollSettingsTagListToEnd();
+
+    await expect.poll(() => tagsApi.lastRequest?.page, POLL).toBe(2);
+    await expect(editorScreen.settingsTagOptions()).toHaveCount(150);
+    await expect.element(editorScreen.settingsTagOption('Tag 150')).toBeVisible();
+  });
+
+  it('finds a tag past the first page by searching for it', async () => {
+    const { saveApi } = fakeTaggablePost();
+    const wanted = PAGED_TAGS[139];
+    const tagsApi = fakeTags(({ filter }) =>
+      filter?.includes('tags.name:~') ? [wanted] : PAGED_TAGS,
+    );
+    await renderAdminApp(`/editor/post/${POST_ID}`, withoutAutosave());
+    await openSidebar();
+    await openTagList();
+
+    await editorScreen.settingsTagsInput().fill('Tag 140');
+
+    await expect.poll(() => tagsApi.lastRequest?.filter, POLL).toBe("tags.name:~'Tag 140'");
+    await editorScreen.settingsTagOption('Tag 140').click();
+    await expect(saveApi).toHaveSavedFields({ tags: [{ id: wanted.id }] });
+  });
+
   it('drops an uncommitted term when the list closes', async () => {
     fakeTaggablePost();
     fakeTags([NEWS]);
-    await renderAdminApp(`/editor/post/${POST_ID}`, FLAG_ON);
+    await renderAdminApp(`/editor/post/${POST_ID}`, withoutAutosave());
     await openSidebar();
     await openTagList();
 
@@ -226,7 +266,7 @@ describe('Post settings tags', () => {
   it('drops an uncommitted term when leaving the field after Escape', async () => {
     const { saveApi } = fakeTaggablePost();
     fakeTags([NEWS]);
-    await renderAdminApp(`/editor/post/${POST_ID}`, FLAG_ON);
+    await renderAdminApp(`/editor/post/${POST_ID}`, withoutAutosave());
     await openSidebar();
     await openTagList();
 
@@ -242,7 +282,7 @@ describe('Post settings tags', () => {
   it('commits the highlighted row on Tab, comma and all', async () => {
     const { saveApi } = fakeTaggablePost();
     fakeTags([NEWS]);
-    await renderAdminApp(`/editor/post/${POST_ID}`, FLAG_ON);
+    await renderAdminApp(`/editor/post/${POST_ID}`, withoutAutosave());
     await openSidebar();
     await openTagList();
 
@@ -260,7 +300,7 @@ describe('Post settings tags', () => {
   it('lets Tab out of an empty field without taking a tag', async () => {
     fakeTaggablePost();
     fakeTags([NEWS]);
-    await renderAdminApp(`/editor/post/${POST_ID}`, FLAG_ON);
+    await renderAdminApp(`/editor/post/${POST_ID}`, withoutAutosave());
     await openSidebar();
     await openTagList();
     await expect.element(editorScreen.settingsTagOption('News')).toBeVisible();
@@ -278,7 +318,7 @@ describe('Post settings tags', () => {
   it('points the field at the row the keyboard is on', async () => {
     fakeTaggablePost();
     fakeTags([NEWS, SPORT]);
-    await renderAdminApp(`/editor/post/${POST_ID}`, FLAG_ON);
+    await renderAdminApp(`/editor/post/${POST_ID}`, withoutAutosave());
     await openSidebar();
     await openTagList();
     await expect.element(editorScreen.settingsTagOption('News')).toBeVisible();
@@ -299,7 +339,7 @@ describe('Post settings tags', () => {
   it('takes the row under the highlight after a pick has shortened the list', async () => {
     fakeTaggablePost();
     fakeTags([NEWS, SPORT]);
-    await renderAdminApp(`/editor/post/${POST_ID}`, FLAG_ON);
+    await renderAdminApp(`/editor/post/${POST_ID}`, withoutAutosave());
     await openSidebar();
     await openTagList();
     await expect.element(editorScreen.settingsTagOption('Sport')).toBeVisible();
@@ -316,7 +356,7 @@ describe('Post settings tags', () => {
   it('removes a tag and saves what is left', async () => {
     const { saveApi } = fakeTaggablePost({ tags: [NEWS, SPORT] });
     fakeTags([NEWS, SPORT]);
-    await renderAdminApp(`/editor/post/${POST_ID}`, FLAG_ON);
+    await renderAdminApp(`/editor/post/${POST_ID}`, withoutAutosave());
     await openSidebar();
 
     await editorScreen.removeSettingsTag('News').click();
@@ -327,7 +367,7 @@ describe('Post settings tags', () => {
   it('drags a tag before another and saves the new order', async () => {
     const { saveApi } = fakeTaggablePost({ tags: [NEWS, SPORT] });
     fakeTags([NEWS, SPORT]);
-    await renderAdminApp(`/editor/post/${POST_ID}`, FLAG_ON);
+    await renderAdminApp(`/editor/post/${POST_ID}`, withoutAutosave());
     await openSidebar();
 
     await dragByPointer(
@@ -344,7 +384,7 @@ describe('Post settings tags', () => {
   it('leaves the tags alone when a drag ends where it began', async () => {
     const { saveApi } = fakeTaggablePost({ tags: [NEWS, SPORT] });
     fakeTags([NEWS, SPORT]);
-    await renderAdminApp(`/editor/post/${POST_ID}`, FLAG_ON);
+    await renderAdminApp(`/editor/post/${POST_ID}`, withoutAutosave());
     await openSidebar();
 
     // Past the press threshold, but still nearest its own place.
@@ -357,7 +397,7 @@ describe('Post settings tags', () => {
   it('removes a tag on a press that barely moves', async () => {
     const { saveApi } = fakeTaggablePost({ tags: [NEWS, SPORT] });
     fakeTags([NEWS, SPORT]);
-    await renderAdminApp(`/editor/post/${POST_ID}`, FLAG_ON);
+    await renderAdminApp(`/editor/post/${POST_ID}`, withoutAutosave());
     await openSidebar();
 
     await dragByPointer(editorScreen.removeSettingsTag('News'), { x: 2, y: 1 });
@@ -372,7 +412,7 @@ describe('Post settings tags', () => {
       tags: [NEWS, SPORT],
     });
     fakeTags([NEWS, SPORT]);
-    await renderAdminApp(`/editor/post/${POST_ID}`, FLAG_ON);
+    await renderAdminApp(`/editor/post/${POST_ID}`, withoutAutosave());
     await openSidebar();
 
     await dragByPointer(
@@ -392,7 +432,7 @@ describe('Post settings tags', () => {
   it('saves a published post’s tags on their own', async () => {
     const { saveApi } = fakeTaggablePost({ status: 'published', published_at: PUBLISHED_AT });
     fakeTags([NEWS]);
-    await renderAdminApp(`/editor/post/${POST_ID}`, FLAG_ON);
+    await renderAdminApp(`/editor/post/${POST_ID}`, withoutAutosave());
     await openSidebar();
     await openTagList();
 
@@ -410,7 +450,7 @@ describe('Post settings tags', () => {
   it('adopts a tag added elsewhere while the writer has not touched tags', async () => {
     const { saveApi, addTagElsewhere } = fakeTaggablePost({ tags: [NEWS] });
     fakeTags([NEWS, NOTICE]);
-    await renderAdminApp(`/editor/post/${POST_ID}`, FLAG_ON);
+    await renderAdminApp(`/editor/post/${POST_ID}`, withoutAutosave());
     await openSidebar();
 
     addTagElsewhere(NOTICE);

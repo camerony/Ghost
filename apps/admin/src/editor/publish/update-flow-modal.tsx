@@ -1,4 +1,4 @@
-import { Banner, Button } from '@tryghost/shade/components';
+import { Button } from '@tryghost/shade/components';
 import { Box, Inline, Stack, Text } from '@tryghost/shade/primitives';
 import { formatNumber } from '@tryghost/shade/utils';
 import { PageHeader } from '@tryghost/shade/patterns';
@@ -18,6 +18,7 @@ import {
   updateFlowTitle,
 } from '@tryghost/test-data/selectors/editor';
 import { FullscreenDialog } from '@/editor/fullscreen-dialog';
+import { FailureBanner } from './components/failure-banner';
 import { createPublishOptions } from './publish-options';
 import {
   describeCompletionFailure,
@@ -25,6 +26,7 @@ import {
   type CompletionFailure,
 } from './completion-message';
 import { formatSiteDateTime } from './publish-copy';
+import { reportPublishFailure } from './report-publish-failure';
 import type { PublishDispatcher } from './publish-options';
 import type { PublishFlowPost } from './flow-post';
 import type { PublishSiteInput, PublishUserInput } from './publish-options';
@@ -78,6 +80,8 @@ function KeyedUpdateFlowModal({
   const isScheduled = post.status === 'scheduled';
   const isSent = post.status === 'sent';
   const emailOnly = post.emailOnly === true || isSent;
+  const canRevert = isScheduled || !emailOnly;
+  const heading = canRevert ? (isScheduled ? 'Unschedule' : 'Unpublish') : 'Sent';
   const willEmail = isScheduled && Boolean(post.newsletter) && !post.email;
   const hasBeenEmailed =
     post.displayName === 'post' &&
@@ -131,8 +135,11 @@ function KeyedUpdateFlowModal({
     try {
       completion = await dispatch(machine.toRevertDispatch());
     } catch (error) {
+      const shown = describeRejectedAction(error);
+      // The dispatch settles every save it runs; a rejection is a fault in getting there.
+      reportPublishFailure('revert-request', shown.message, { error, postId: post.id });
       if (activeRef.current) {
-        setFailure(describeRejectedAction(error));
+        setFailure(shown);
         setRunning(false);
       }
       runningRef.current = false;
@@ -166,22 +173,19 @@ function KeyedUpdateFlowModal({
   return (
     <FullscreenDialog
       data-testid={updateFlowModal}
-      modal={false}
-      title={isScheduled ? 'Unschedule' : 'Unpublish'}
+      title={heading}
       open
       onOpenChange={(open) => !open && close()}
     >
       <Box className="relative min-h-full">
         <Inline className="absolute inset-x-0 top-0 p-4" justify="between">
           <Text aria-hidden="true" as="h2" className="text-lg tracking-tight" weight="semibold">
-            {isScheduled ? 'Unschedule' : 'Unpublish'}
+            {heading}
           </Text>
           <PageHeader.ActionGroup>
-            {isSent ? null : (
-              <Button variant="outline" onClick={close}>
-                Close
-              </Button>
-            )}
+            <Button variant="outline" onClick={close}>
+              Close
+            </Button>
           </PageHeader.ActionGroup>
         </Inline>
 
@@ -240,20 +244,16 @@ function KeyedUpdateFlowModal({
             </Text>
           ) : null}
 
-          {failure ? (
-            <Banner role="alert" variant="destructive">
-              {failure.message}
-            </Banner>
-          ) : null}
+          {failure ? <FailureBanner failure={failure} /> : null}
 
-          {isScheduled || !emailOnly ? (
+          {canRevert ? (
             <Inline justify="start">
               <Button
                 className="h-auto min-h-11 max-w-full px-5 py-2 whitespace-normal"
                 data-testid={publishRevertToDraft}
                 disabled={running}
                 size="lg"
-                variant="outline"
+                variant="secondary"
                 onClick={() => void revert()}
               >
                 {isScheduled

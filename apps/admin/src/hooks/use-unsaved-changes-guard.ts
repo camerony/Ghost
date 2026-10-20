@@ -7,6 +7,7 @@ import {
   useLocation,
 } from '@tryghost/admin-x-framework';
 import { useHashLinkNavigationGuard } from '@/hooks/use-hash-link-navigation-guard';
+import { useTrackActiveUnsavedChangesGuard } from '@/hooks/active-unsaved-changes-guards';
 import {
   useHistoryPopNavigationGuard,
   withoutTrailingSlash,
@@ -100,6 +101,7 @@ export function useUnsavedChangesGuard({
   interceptRef.current = interceptNavigation;
 
   useConfirmUnload(confirmUnloadWhen ?? when);
+  useTrackActiveUnsavedChangesGuard(when);
 
   const blocker = useBlocker((args) => {
     // A POP can only be undone from a router-created entry; elsewhere the router
@@ -125,16 +127,20 @@ export function useUnsavedChangesGuard({
     }
     return shouldBlock;
   });
-  const anchorGuard = useHashLinkNavigationGuard(when, () => {
-    blockedNavigationRef.current = true;
-  });
-  const popGuard = useHistoryPopNavigationGuard(when && guardHistoryPops, () => {
+  // Only the first exit is held; anchors and pops that follow it are dropped.
+  const claimExit = () => {
     if (blockedNavigationRef.current) {
       return false;
     }
     blockedNavigationRef.current = true;
     return true;
-  });
+  };
+  const anchorGuard = useHashLinkNavigationGuard(when, claimExit);
+  const popGuard = useHistoryPopNavigationGuard(
+    when && guardHistoryPops,
+    claimExit,
+    () => blockedNavigationRef.current,
+  );
 
   const isBlockedByIntercept = blocker.state === 'blocked' && blockedByInterceptRef.current;
   const isBlocked =

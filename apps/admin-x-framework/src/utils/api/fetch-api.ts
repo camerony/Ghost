@@ -12,6 +12,7 @@ import {
 import { isAuthPath } from '../auth-paths';
 import { getGhostPaths } from '../helpers';
 import handleResponse, { ResponseType } from './handle-response';
+import { reportUpgradeStatus } from './upgrade-status';
 
 export interface RequestOptions {
   method?: string;
@@ -53,7 +54,8 @@ const xhrHeadersToFetchHeaders = (xhr: Readonly<XMLHttpRequest>): Headers => {
 };
 
 const xhrToFetchResponse = (xhr: Readonly<XMLHttpRequest>): Response =>
-  new Response(xhr.response, {
+  // Fetch forbids even an empty ArrayBuffer body for these statuses.
+  new Response([204, 205, 304].includes(xhr.status) ? null : xhr.response, {
     status: xhr.status,
     statusText: xhr.statusText,
     headers: xhrHeadersToFetchHeaders(xhr),
@@ -67,6 +69,19 @@ const CURRENT_USER_REQUEST = /\/ghost\/api\/admin\/users\/me\/([?#]|$)/;
 // before that are the signed-out state, which the signin flow handles.
 let sessionConfirmed = false;
 let sessionExpiryHandled = false;
+const sessionExpiryRedirectHolds = new Set<symbol>();
+
+/**
+ * Keeps an expired session found by any request from leaving the page until the
+ * returned release is called, for a screen that signs in again in place.
+ */
+export const holdSessionExpiryRedirect = (): (() => void) => {
+  const hold = Symbol('sessionExpiryRedirectHold');
+  sessionExpiryRedirectHolds.add(hold);
+  return () => {
+    sessionExpiryRedirectHolds.delete(hold);
+  };
+};
 
 const isUnauthenticatedAdminRoute = (adminRoot: string) => {
   return (
@@ -84,14 +99,79 @@ const isSessionExpiry = (endpoint: string | URL) => {
   return GHOST_API_REQUEST.test(url) && !SESSION_API_REQUEST.test(url);
 };
 
+// Whether the error a request to `endpoint` failed with means the session expired. This is the
+// single rule for every request Admin makes, whether through `useFetchApi` or not.
+const isExpiredSession = (error: unknown, endpoint: string | URL): error is UnauthorizedError =>
+  error instanceof UnauthorizedError && isSessionExpiry(endpoint);
+
 // Replace to the admin root at most once across concurrent failures, unless
-// Ember is already booting or displaying an unauthenticated route
+// Admin is already on an unauthenticated route or a screen holds it
 const redirectOnSessionExpiry = () => {
   const { adminRoot } = getGhostPaths();
 
-  if (sessionConfirmed && !sessionExpiryHandled && !isUnauthenticatedAdminRoute(adminRoot)) {
+  if (
+    sessionConfirmed &&
+    !sessionExpiryHandled &&
+    sessionExpiryRedirectHolds.size === 0 &&
+    !isUnauthenticatedAdminRoute(adminRoot)
+  ) {
     sessionExpiryHandled = true;
     window.location.replace(adminRoot);
+  }
+};
+
+// Runs one session check at a time, however many responses ask for one.
+let sessionCheck: Promise<boolean> | undefined;
+
+// How long the session check may take. An app's request waits on it, so a check that never answers
+// mustn't hold the request forever; one that times out counts as the session still working.
+const SESSION_CHECK_TIMEOUT_MS = 10_000;
+
+// Whether Ghost reports that the session has expired, checked with the current user's endpoint.
+const sessionHasExpired = (): Promise<boolean> => {
+  sessionCheck ??= (async () => {
+    const endpoint = apiUrl('/users/me/');
+    try {
+      const response = await fetch(endpoint, {
+        credentials: 'include',
+        headers: ghostApiRequestHeaders({}),
+        signal: AbortSignal.timeout(SESSION_CHECK_TIMEOUT_MS),
+      });
+      return await handleResponse(response).then(
+        () => false,
+        (error: unknown) => isExpiredSession(error, endpoint),
+      );
+    } catch {
+      return false;
+    }
+  })().finally(() => {
+    sessionCheck = undefined;
+  });
+  return sessionCheck;
+};
+
+/**
+ * Redirects to the Admin root, as `useFetchApi` does, when a request Admin makes for an app finds
+ * the session expired. An unauthorized response to these requests can't be trusted alone,
+ * because an app can trigger one, for example from a route that expects a token in its URL. So it
+ * only counts once Ghost confirms the session has expired, by checking `/users/me/`. As with any
+ * request, only a Ghost API path other than the session endpoint counts, and only once this page
+ * load has seen the session work. Reads a clone of a failed `response`, so the caller can still
+ * read its body. A successful response isn't read at all.
+ */
+export const handleSessionExpiry = async (
+  endpoint: string | URL,
+  response: Response,
+): Promise<void> => {
+  if (response.ok) {
+    return;
+  }
+  const expired = await handleResponse(response.clone()).then(
+    () => false,
+    (error: unknown) => isExpiredSession(error, endpoint),
+  );
+  if (expired && (await sessionHasExpired())) {
+    redirectOnSessionExpiry();
   }
 };
 
@@ -143,7 +223,11 @@ const fetchWithXhr = (
     };
 
     xhr.onload = () => {
-      resolve(xhrToFetchResponse(xhr));
+      try {
+        resolve(xhrToFetchResponse(xhr));
+      } catch (error) {
+        reject(error);
+      }
     };
 
     xhr.onerror = () => {
@@ -162,8 +246,27 @@ const fetchWithXhr = (
     xhr.send(body);
   });
 
+/**
+ * The headers Admin sends with every request to Ghost's API, with lowercase names. Requests Admin
+ * makes on an app's behalf use them too, so those requests look like Admin's own.
+ */
+export const ghostApiRequestHeaders = ({
+  ghostVersion,
+  body,
+}: {
+  ghostVersion?: string;
+  body?: unknown;
+}): Record<string, string> => ({
+  'app-pragma': 'no-cache',
+  // Only include version header if ghostVersion is provided
+  // This allows forward admin deployments to skip version checks
+  ...(ghostVersion ? { 'x-ghost-version': ghostVersion } : {}),
+  // By default, we set the Content-Type header to application/json
+  ...(typeof body === 'string' ? { 'content-type': 'application/json' } : {}),
+});
+
 export const useFetchApi = () => {
-  const { ghostVersion, sentryDSN } = useFramework();
+  const { ghostVersion } = useFramework();
 
   // Memoized so hooks that depend on fetchApi can cache
   /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -188,12 +291,7 @@ export const useFetchApi = () => {
       const requestInit: InternalRequestInit = {
         method,
         headers: {
-          'app-pragma': 'no-cache',
-          // Only include version header if ghostVersion is provided
-          // This allows forward admin deployments to skip version checks
-          ...(ghostVersion ? { 'x-ghost-version': ghostVersion } : {}),
-          // By default, we set the Content-Type header to application/json
-          ...(typeof body === 'string' ? { ['content-type']: 'application/json' } : {}),
+          ...ghostApiRequestHeaders({ ghostVersion, body }),
           ...headers,
         },
         credentials,
@@ -212,11 +310,13 @@ export const useFetchApi = () => {
       const retryPeriods = [500, 1000];
       const retryableErrors = [ServerUnreachableError, MaintenanceError, TypeError];
 
-      const getErrorData = (error?: APIError, response?: Response) => {
+      const getErrorData = (response?: Response, error?: unknown) => {
         const data: Record<string, unknown> = {
-          errorName: error?.name,
+          error: error === undefined ? undefined : String(error),
+          status: response?.status,
+          method,
           attempts,
-          totalSeconds: retryingMs / 1000,
+          totalSeconds: (Date.now() - startTime) / 1000,
           endpoint: endpoint.toString(),
         };
         if (endpoint.toString().includes('/ghost/api/')) {
@@ -240,6 +340,11 @@ export const useFetchApi = () => {
             if (CURRENT_USER_REQUEST.test(endpoint.toString())) {
               sessionConfirmed = true;
             }
+            if (attempts !== 0 && Sentry.getClient()) {
+              Sentry.captureMessage('Request took multiple attempts', {
+                extra: getErrorData(response),
+              });
+            }
             return data;
           } catch (error) {
             retryingMs = Date.now() - startTime;
@@ -260,9 +365,9 @@ export const useFetchApi = () => {
               continue;
             }
 
-            if (attempts !== 0 && sentryDSN) {
+            if (attempts !== 0 && Sentry.getClient()) {
               Sentry.captureMessage('Request failed after multiple attempts', {
-                extra: getErrorData(),
+                extra: getErrorData(error instanceof APIError ? error.response : undefined, error),
               });
             }
 
@@ -275,7 +380,7 @@ export const useFetchApi = () => {
               throw new TimeoutError();
             }
 
-            if (error instanceof UnauthorizedError && isSessionExpiry(endpoint)) {
+            if (isExpiredSession(error, endpoint)) {
               if (sessionExpiryRedirect) {
                 redirectOnSessionExpiry();
               }
@@ -286,6 +391,10 @@ export const useFetchApi = () => {
 
             if (!(error instanceof APIError)) {
               newError = new ServerUnreachableError({ cause: error });
+            }
+
+            if (GHOST_API_REQUEST.test(endpoint.toString())) {
+              reportUpgradeStatus(newError);
             }
 
             throw newError;
@@ -300,7 +409,7 @@ export const useFetchApi = () => {
       // because of retry + attempts usage combination
       return undefined as never;
     },
-    [ghostVersion, sentryDSN],
+    [ghostVersion],
   );
 };
 

@@ -31,6 +31,15 @@ If a control exists, use it. If it doesn't and you'll reuse it, [Layers](?path=/
 
 See **[Contributing](?path=/docs/overview-contributing--docs)** for the implementation and review checklist.
 
+## Using Shade in a standalone app
+
+Install `@tryghost/shade@alpha` with React 18 and Tailwind CSS 4.1+. Import
+`@tryghost/shade/styles.css` in the app stylesheet and wrap the app in `ShadeApp`.
+The published stylesheet registers Shade's sources with Tailwind automatically.
+See the [Shade README](https://github.com/TryGhost/Ghost/blob/main/apps/shade/README.md#usage-in-standalone-surfaces)
+for the Vite setup example. Embedded Admin apps inherit Admin's stylesheet and
+wrapper instead.
+
 ## Admin 7 milestones
 
 Shade previews use the new controls by default. New screens use ordinary
@@ -40,10 +49,8 @@ pages. Form selects and input groups retain standard rounded corners; their
 embedded action buttons inherit the button shape. PageHeader.SelectTrigger supplies
 the pill shape for header dropdowns. Explicit shapes remain available for a specific visual need.
 
-Admin enables the current design on all React-owned routes without a Labs flag.
-It passes `isAdmin7={false}` on Ember-owned routes, including the editor while
-`editorReact` is disabled, to preserve their compatibility appearance. The generic
-`isAdmin7` provider switch remains available for these legacy surfaces:
+Admin enables the current design on every route without a Labs flag. The generic
+`isAdmin7` provider switch remains available:
 
 ```tsx
 <ShadeApp darkMode={darkMode} isAdmin7={isAdmin7}>
@@ -73,7 +80,7 @@ boolean from the shared application wrapper.
 
 The [feature flag guide](https://github.com/TryGhost/Ghost/blob/main/docs/practices/feature-flags.md#admin-7-milestones)
 covers naming, shared presentation, testing and removal. Retain compatibility
-branches while Ember-owned surfaces still need them; ordinary component calls
+branches only while a surface still needs them; ordinary component calls
 already use the intended defaults.
 
 </div>

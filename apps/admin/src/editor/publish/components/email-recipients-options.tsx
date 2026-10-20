@@ -6,7 +6,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@tryghost/shade/components';
-import { Stack } from '@tryghost/shade/primitives';
+import { Stack, Text } from '@tryghost/shade/primitives';
+import { formatNumber } from '@tryghost/shade/utils';
 import { getNewsletterRecipientFilter } from '@tryghost/admin-x-framework/utils/recipient-filter';
 import { publishNewsletterSelect } from '@tryghost/test-data/selectors/editor';
 import { useBrowseConfig } from '@tryghost/admin-x-framework/api/config';
@@ -122,6 +123,7 @@ export function EmailRecipientsOptions({
             .sort((a, b) => Number(b.active) - Number(a.active))
             .map((tier) => ({
               segment: `tier:${tier.slug}`,
+              aliases: [`tier_id:${tier.id}`],
               name: tier.name,
               group: tier.active ? 'Active tiers' : 'Archived tiers',
             }))
@@ -164,12 +166,23 @@ export function EmailRecipientsOptions({
             }
           >
             <SelectTrigger data-testid={publishNewsletterSelect} id={newsletterId}>
-              <SelectValue placeholder="Select a newsletter" />
+              {/* Radix would copy the whole option, count included, into the trigger. */}
+              <SelectValue placeholder="Select a newsletter">
+                {state.newsletter ? (state.newsletter.name ?? state.newsletter.slug) : undefined}
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
               {state.newsletters.map((newsletter) => (
                 <SelectItem key={newsletter.slug} value={newsletter.slug}>
                   {newsletter.name ?? newsletter.slug}
+                  {newsletter.activeMembers === undefined ? null : (
+                    <>
+                      {' '}
+                      <Text as="span" leading="none" size="sm" tone="secondary">
+                        ({formatNumber(newsletter.activeMembers)})
+                      </Text>
+                    </>
+                  )}
                 </SelectItem>
               ))}
             </SelectContent>

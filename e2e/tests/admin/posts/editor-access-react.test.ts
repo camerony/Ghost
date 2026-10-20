@@ -15,12 +15,11 @@ import { expect, test, withIsolatedPage } from '@/helpers/playwright';
 import { signInAsMember } from '@/helpers/playwright/flows/sign-in';
 
 /**
- * The Access section of the React post editor's settings sidebar, behind the
- * `editorReact` Labs flag. Each case follows one visibility choice the whole
- * way round: what the writer picks, what the server holds afterwards, and what
- * the site shows an anonymous visitor and a member the choice lets in. The
- * acceptance tier stops at the request; whether Ghost honours the value is
- * only observable here.
+ * The Access section of the React post editor's settings sidebar. Each case
+ * follows one visibility choice the whole way round: what the writer picks,
+ * what the server holds afterwards, and what the site shows an anonymous
+ * visitor and a member the choice lets in. The acceptance tier stops at the
+ * request; whether Ghost honours the value is only observable here.
  */
 
 const POSTS_API = '/ghost/api/admin/posts/';
@@ -94,7 +93,7 @@ async function startDraft(page: Page, { title, body }: { title: string; body: st
   await postsPage.goto();
   await postsPage.newPostButton.click();
 
-  const editor = new PostEditorPage(page, { implementation: 'react' });
+  const editor = new PostEditorPage(page);
   await Promise.all([
     page.waitForResponse(
       (response) =>
@@ -109,10 +108,6 @@ async function startDraft(page: Page, { title, body }: { title: string; body: st
 }
 
 test.describe('Ghost Admin - Post editor access (React)', () => {
-  // Flag state belongs on the describe — `test.use` inside a test body has no
-  // effect on the fixtures that test already resolved.
-  test.use({ labs: { editorReact: true } });
-
   let memberFactory: MemberFactory;
   let postFactory: PostFactory;
   let tierFactory: TierFactory;
@@ -159,15 +154,15 @@ test.describe('Ghost Admin - Post editor access (React)', () => {
 
       await settings.openSection('access');
       await settings.access.setVisibility(SPECIFIC_TIERS);
-      // The picker opens with every paid tier ticked, the site's own default
-      // tier included, so one tier is an untick of all the others
+      // The picker opens with every paid tier selected, the site's own default
+      // tier included, so one tier is a removal of all the others
       await settings.access.selectTier(ticked.name);
       const others = (await readPaidTiers(page)).filter((tier) => tier.id !== ticked.id);
       for (const tier of others) {
         await settings.access.deselectTier(tier.name);
       }
-      await expect(settings.access.tier(ticked.name)).toBeChecked();
-      await expect(settings.access.tier(other.name)).not.toBeChecked();
+      await expect(settings.access.tier(ticked.name)).toBeVisible();
+      await expect(settings.access.tier(other.name)).toHaveCount(0);
 
       await editor.publishFlow.open();
       await expect(editor.publishFlow.optionsStep).toBeVisible();
@@ -216,7 +211,7 @@ test.describe('Ghost Admin - Post editor access (React)', () => {
       status: 'free',
     });
 
-    const editor = new PostEditorPage(page, { implementation: 'react' });
+    const editor = new PostEditorPage(page);
     await editor.gotoPost(created.id);
     const { settings } = editor;
 

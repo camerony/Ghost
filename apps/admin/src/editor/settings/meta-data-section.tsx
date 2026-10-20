@@ -10,6 +10,7 @@ import {
 import { Inline, Stack, Text } from '@tryghost/shade/primitives';
 import { LucideIcon, cn, formatNumber } from '@tryghost/shade/utils';
 import {
+  settingsCanonicalUrlInput,
   settingsMetaDescriptionInput,
   settingsMetaTitleInput,
   settingsSerpPreview,
@@ -27,7 +28,6 @@ import {
   serpDescription,
   serpTitle,
 } from './meta-data-fields';
-import { SettingsSubview } from './settings-subview';
 import { useSettingsField } from './use-settings-field';
 
 function Countdown({ id, value, recommended }: { id: string; value: string; recommended: number }) {
@@ -83,7 +83,7 @@ function SearchPreview({
   );
 }
 
-export interface MetaDataSectionProps {
+export interface MetaDataFieldsProps {
   session: EditorSettingsPort;
   siteUrl: string;
 }
@@ -92,7 +92,7 @@ export interface MetaDataSectionProps {
  * The post's search-engine metadata: a meta title and description that stand in
  * for the post's own, and the result they produce.
  */
-export function MetaDataSection({ session, siteUrl }: MetaDataSectionProps) {
+export function MetaDataFields({ session, siteUrl }: MetaDataFieldsProps) {
   const titleHintId = useId();
   const descriptionHintId = useId();
 
@@ -112,13 +112,7 @@ export function MetaDataSection({ session, siteUrl }: MetaDataSectionProps) {
   });
 
   return (
-    <SettingsSubview
-      closeLabel="Close meta data panel"
-      icon={<LucideIcon.Search />}
-      id="meta-data"
-      label="Meta data"
-      title="Meta data"
-    >
+    <>
       <Field>
         <FieldLabel htmlFor={title.fieldProps.id}>Meta title</FieldLabel>
         <Input
@@ -149,6 +143,7 @@ export function MetaDataSection({ session, siteUrl }: MetaDataSectionProps) {
       <Field>
         <FieldLabel htmlFor={canonical.fieldProps.id}>Canonical URL</FieldLabel>
         <Input
+          data-testid={settingsCanonicalUrlInput}
           placeholder={
             session.loadedRecord?.url ?? `${siteUrl.replace(/\/$/, '')}/${session.slug}/`
           }
@@ -163,6 +158,6 @@ export function MetaDataSection({ session, siteUrl }: MetaDataSectionProps) {
         </Text>
         <SearchPreview description={previewDescription} title={previewTitle} url={previewUrl} />
       </Stack>
-    </SettingsSubview>
+    </>
   );
 }

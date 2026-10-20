@@ -6,6 +6,7 @@ import {
   isCollisionToken,
   isSettingsOnly,
   zeroMilliseconds,
+  type ConfirmOutcome,
   type LeaveDecision,
   type PersistedIdentity,
   type PendingSave,
@@ -21,9 +22,11 @@ import {
   type SaveResult,
 } from '@/editor/engine/save-engine';
 import type {
+  BodyDivergence,
   ChangeReasonCode,
   EditablePostPatch,
   EditablePostProjection,
+  ProjectionKey,
   RestoredRevision,
   RevisionProjection,
 } from '@/editor/engine/change-tracker';
@@ -37,17 +40,14 @@ import { createSlugPort } from './slug-port';
 import { buildSaveSnapshot, type EditorSaveSnapshot } from './snapshot';
 import { latestRevisionOf, newPostProjection, projectionOf, type EditorRecord } from './projection';
 import {
-  AUTHORS_REQUIRED,
-  PUBLISHED_AT_MUST_BE_PAST,
   SETTINGS_FIELD_KEYS,
   VALIDATED_SETTINGS_FIELD_KEYS,
   identityFor,
-  publishedAtInFuture,
-  settingsFieldError,
+  invalidField,
   tiersIncomplete,
-  titleError,
   validatedFieldsOf,
   type EditorSettingsPatch,
+  type InvalidField,
   type EditorSettingsFields,
   type SettingsFieldKey,
 } from './settings-fields';
@@ -75,6 +75,8 @@ export interface EditorLeaveConfirmation {
   readonly status: PostStatus;
   readonly engineState: SaveEngineState['kind'];
   readonly reasons: ChangeReasonCode[];
+  readonly dirtyFields: ProjectionKey[];
+  readonly bodyDiff: BodyDivergence | null;
 }
 
 /** Fields the engine writes onto the request rather than reading from the live post. */
@@ -98,6 +100,7 @@ export type PreparedSave =
   | (PreparedWrite & { isCreate: false; payload: EditorEditPayload });
 
 const MISSING_COLLISION_TOKEN = 'Cannot save without the version this post was loaded at.';
+const SAVED_ELSEWHERE = 'A newer version of this post was saved since it was opened.';
 
 function preparedOrInvalid(
   prepared: PreparedSave,
@@ -115,6 +118,8 @@ export interface EditorSessionTransport {
     options: PostWriteOptions,
   ) => Promise<EditorRecord | undefined>;
   generateSlug: (text: string, postId: string | null) => Promise<string>;
+  /** The post as the server holds it now. */
+  read: (id: string) => Promise<EditorRecord | undefined>;
 }
 
 export interface EditorSessionOptions {
@@ -128,6 +133,8 @@ export interface EditorSessionOptions {
   transport: EditorSessionTransport;
   /** Called once the create acknowledges; the caller replaces the URL. */
   onIdAcquired: (id: string) => void;
+  /** Called with the record the server answered each acknowledged save with. */
+  onSaveAcknowledged?: (saved: EditorRecord) => void;
   onError: (error: unknown, context?: EditorErrorContext) => void;
   /** Called once per request that settled as failed. */
   onSaveFailed?: (failure: EditorSaveFailure) => void;
@@ -147,6 +154,11 @@ export interface EditorSessionView {
   readonly slug: string;
   readonly settings: EditorSettingsFields;
   readonly publishTime: { status: PostStatus; publishedAt: string | null };
+  /** The feature image's alt text and caption, another writer's once adopted. */
+  readonly featureImageAlt: string | null;
+  readonly featureImageCaption: string | null;
+  /** A refused read carried a later version; only while nothing is unsaved and no save is under way. */
+  readonly newerVersionAvailable: boolean;
 }
 
 export interface EditorSession {
@@ -195,6 +207,8 @@ export interface EditorSession {
   dispatchExplicit: () => Promise<SaveCompletion>;
   /** Retries a failed save: a settings save on a post that is not a draft as one, else explicitly. */
   retrySave: () => Promise<SaveCompletion>;
+  /** The field an explicit save of the live document would be refused over, by the save's own validator. */
+  invalidField: () => InvalidField | null;
   dispatchPublish: (options?: PublishOptions) => Promise<SaveCompletion>;
   dispatchSchedule: (options: ScheduleOptions) => Promise<SaveCompletion>;
   dispatchRevert: () => Promise<SaveCompletion>;
@@ -216,6 +230,16 @@ const BODY_WORK_REASONS: ReadonlySet<ChangeReasonCode> = new Set([
   'BASELINE_FAILED',
   'LEXICAL_PARSE_FAILED',
 ]);
+
+// Core stores the alt text and caption beside the post, so a read at the held
+// token can carry another writer's edit to them, as it can to the settings.
+const ADOPTED_KEYS = [
+  ...SETTINGS_FIELD_KEYS,
+  'feature_image_alt',
+  'feature_image_caption',
+] as const;
+
+type AdoptedKey = (typeof ADOPTED_KEYS)[number];
 
 /** What a local copy carries besides the body. */
 const COPIED_FIELD_KEYS = [
@@ -280,6 +304,14 @@ function isHeldToken(candidate: string | null | undefined, held: string | null):
   );
 }
 
+/** Whether a collision token names a version later than another; any token is later than none. */
+function isLaterToken(candidate: string | null, than: string | null): boolean {
+  return (
+    isCollisionToken(candidate) &&
+    (!than || (isCollisionToken(than) && Date.parse(candidate) > Date.parse(than)))
+  );
+}
+
 /**
  * Composes the change tracker, slug machine and save engine into one editing
  * session: one per opened post, never shared between two new posts.
@@ -292,6 +324,7 @@ export function createEditorSession({
   autosaveDebounceMs,
   transport,
   onIdAcquired,
+  onSaveAcknowledged,
   onError,
   onSaveFailed,
   onLeaveConfirmed,
@@ -300,6 +333,9 @@ export function createEditorSession({
   let identity: PersistedIdentity = record
     ? { id: record.id, updatedAt: record.updated_at ?? '' }
     : { id: null, updatedAt: null };
+  // Core allows a post with no updated_at, as imported posts can be, and skips its
+  // collision check for an update without one; the first save stamps it.
+  let requiresUpdatedAt = !record || Boolean(record.updated_at);
   let status: PostStatus = record?.status ?? 'draft';
   let publishedAt: string | null = record?.published_at ?? null;
   // Retain the writer's choice through older saves, even when it matches a refetch.
@@ -313,9 +349,9 @@ export function createEditorSession({
   let disposed = false;
   // A proposal is unsaved work before it becomes a sanitized document field.
   const pendingSlugEdits = new Set<symbol>();
-  // The version each settings field was last edited at by the writer. Adopting
+  // The version each adoptable field was last edited at by the writer. Adopting
   // is not an edit, so a snapshot of the live values could not answer this.
-  const writerEdits = new Map<SettingsFieldKey, number>();
+  const writerEdits = new Map<AdoptedKey, number>();
   // The version the in-flight request was built at, or null when none is.
   let inFlightSince: number | null = null;
   // The excerpt under the title is canvas content: a settings save leaves it for Update.
@@ -326,6 +362,8 @@ export function createEditorSession({
   let flushedConflictError: unknown = null;
   // The engine is holding an error a settings save met.
   let refusedSettings = false;
+  // The latest version a refused read carried; stale once the held token reaches it.
+  let newerVersion: string | null = null;
 
   function livePublishedAt(): string | null {
     return stagedPublishedAt ?? publishedAt;
@@ -377,6 +415,11 @@ export function createEditorSession({
       view.publishTime.publishedAt === currentPublishedAt
         ? view.publishTime
         : { status, publishedAt: currentPublishedAt };
+    // While a save is under way, the later version may be its own read before its answer.
+    const newerVersionAvailable =
+      (state.kind === 'idle' || state.kind === 'debouncing') &&
+      !isDirty &&
+      isLaterToken(newerVersion, identity.updatedAt);
 
     // Body edits need no new React snapshot while the rendered values stay the
     // same. Keep nested settings and time references stable across engine events.
@@ -388,7 +431,10 @@ export function createEditorSession({
       view.title === live.title &&
       view.slug === currentSlug &&
       view.settings === settings &&
-      view.publishTime === publishTime
+      view.publishTime === publishTime &&
+      view.featureImageAlt === live.feature_image_alt &&
+      view.featureImageCaption === live.feature_image_caption &&
+      view.newerVersionAvailable === newerVersionAvailable
     ) {
       return;
     }
@@ -400,6 +446,9 @@ export function createEditorSession({
       slug: currentSlug,
       settings,
       publishTime,
+      featureImageAlt: live.feature_image_alt,
+      featureImageCaption: live.feature_image_caption,
+      newerVersionAvailable,
     };
     for (const listener of changeListeners) {
       try {
@@ -414,7 +463,7 @@ export function createEditorSession({
     const before = live;
     live = { ...live, ...patch };
     version += 1;
-    for (const key of SETTINGS_FIELD_KEYS) {
+    for (const key of ADOPTED_KEYS) {
       // Re-emitting a value the field already holds is not an edit, and a
       // relation re-emitted as a fresh array holds the same value.
       if (patch[key] !== undefined && !sameFieldValue(key, before[key], patch[key])) {
@@ -454,22 +503,22 @@ export function createEditorSession({
 
   // The one rule both adoption paths ask, so a refetch and an acknowledgement
   // cannot disagree about who owns a field.
-  function isAdoptable(key: SettingsFieldKey): boolean {
+  function isAdoptable(key: AdoptedKey): boolean {
     if (tracker.isFieldDirty(key)) {
       return false;
     }
     return inFlightSince === null || (writerEdits.get(key) ?? 0) <= inFlightSince;
   }
 
-  // The server's copy of a settings field the writer has not moved past wins,
+  // The server's copy of an adoptable field the writer has not moved past wins,
   // the same rule the authored fields use: without it a value the server
   // normalized or someone else changed reads as a local edit for good.
-  function adoptSettings(
+  function adoptFields(
     next: EditablePostProjection,
-    adoptable: (key: SettingsFieldKey) => boolean,
+    adoptable: (key: AdoptedKey) => boolean,
   ): void {
     const patch: Record<string, unknown> = {};
-    for (const key of SETTINGS_FIELD_KEYS) {
+    for (const key of ADOPTED_KEYS) {
       if (adoptable(key) && live[key] !== next[key]) {
         patch[key] = next[key];
       }
@@ -581,29 +630,35 @@ export function createEditorSession({
     projection: EditablePostPatch,
     settingsOnly: boolean,
   ): string | null {
-    const creatingDraft = request.snapshot.id === null && request.target.status === 'draft';
-    // The canvas fields a settings save leaves for Update are checked by Update.
-    const invalid =
-      (settingsOnly ? null : titleError(request.title)) ??
-      settingsFieldError(
-        validatedFieldsOf(live),
-        creatingDraft,
-        settingsOnly ? VALIDATED_SETTINGS_FIELD_KEYS.filter(heldForUpdate) : [],
-      );
-    if (invalid) {
-      return invalid;
-    }
-    // A status command with no time of its own carries whatever the sidebar
-    // staged; Core validates the publish time for scheduled posts only.
-    if (
-      request.target.publishedAt !== publishedAt &&
-      publishedAtInFuture(request.target.status, request.target.publishedAt)
-    ) {
-      return PUBLISHED_AT_MUST_BE_PAST;
-    }
-    // Only an emptied list reaches the request; an untouched create is credited
-    // to the current user while the payload is built.
-    return projection.authors?.length === 0 ? AUTHORS_REQUIRED : null;
+    return (
+      invalidField({
+        // The canvas fields a settings save leaves for Update are checked by Update.
+        title: settingsOnly ? null : request.title,
+        fields: validatedFieldsOf(live),
+        isNew: request.snapshot.id === null && request.target.status === 'draft',
+        skip: settingsOnly ? VALIDATED_SETTINGS_FIELD_KEYS.filter(heldForUpdate) : [],
+        // A status command with no time of its own carries whatever the sidebar staged.
+        changedPublishTime:
+          request.target.publishedAt !== publishedAt
+            ? { status: request.target.status, publishedAt: request.target.publishedAt }
+            : null,
+        // Only an emptied list reaches the request; an untouched create is credited
+        // to the current user while the payload is built.
+        authors: projection.authors,
+      })?.message ?? null
+    );
+  }
+
+  // What an explicit save of the live document would be refused over.
+  function liveInvalidField(): InvalidField | null {
+    const current = livePublishedAt();
+    return invalidField({
+      title: live.title,
+      fields: validatedFieldsOf(live),
+      isNew: identity.id === null && status === 'draft',
+      changedPublishTime: current !== publishedAt ? { status, publishedAt: current } : null,
+      authors: tracker.isFieldDirty('authors') ? live.authors : undefined,
+    });
   }
 
   function prepare(
@@ -706,12 +761,14 @@ export function createEditorSession({
         ),
       );
     }
-    if (!projection.updated_at) {
+    if (!projection.updated_at && (requiresUpdatedAt || newerVersion !== null)) {
       // Without the token the server skips its collision check entirely and the
       // save would overwrite whatever landed in the meantime.
       return Promise.resolve({
         ok: false,
-        error: { kind: 'unknown', message: MISSING_COLLISION_TOKEN },
+        error: requiresUpdatedAt
+          ? { kind: 'unknown', message: MISSING_COLLISION_TOKEN }
+          : { kind: 'conflict', message: SAVED_ELSEWHERE },
       });
     }
     return Promise.resolve(
@@ -719,7 +776,7 @@ export function createEditorSession({
         {
           ...prepared,
           isCreate: false,
-          payload: { ...payload, id, updated_at: projection.updated_at },
+          payload: { ...payload, id, updated_at: projection.updated_at || null },
         },
         invalid,
       ),
@@ -757,6 +814,32 @@ export function createEditorSession({
     }
   }
 
+  // A write landed when the server holds this session's saved copy with exactly
+  // that write over it; a copy anyone else touched stays theirs to collide with.
+  async function confirm(prepared: PreparedSave): Promise<ConfirmOutcome<EditorSaveResult>> {
+    if (prepared.isCreate) {
+      return { ok: true, result: null };
+    }
+    let post: EditorRecord | undefined;
+    try {
+      post = await transport.read(prepared.payload.id);
+    } catch (error) {
+      return { ok: false, error: toSaveError(error, saveFailureMessage) };
+    }
+    if (
+      !post ||
+      !isLaterToken(post.updated_at ?? null, identity.updatedAt) ||
+      post.status !== prepared.target.status ||
+      !tracker.holdsWrite(prepared.projection, projectionOf(post))
+    ) {
+      return { ok: true, result: null };
+    }
+    return {
+      ok: true,
+      result: { id: post.id, status: post.status, updatedAt: post.updated_at ?? '', post },
+    };
+  }
+
   function reconcile(prepared: PreparedSave, result: EditorSaveResult): void {
     // A settings save carries no title, and the slug only once the writer moved
     // it; the answer settles only what the request carried.
@@ -772,7 +855,7 @@ export function createEditorSession({
     // those edits through the rebase, whose fallback base is the latest saved
     // copy. Submitted fields already have a stable base in the request.
     const unsubmittedEdits: EditablePostPatch = Object.fromEntries(
-      SETTINGS_FIELD_KEYS.filter(
+      ADOPTED_KEYS.filter(
         (key) =>
           prepared.projection[key] === undefined &&
           (writerEdits.get(key) ?? 0) > prepared.builtAtVersion,
@@ -792,11 +875,12 @@ export function createEditorSession({
     // The tracker now holds the retained edits as well as the rebase, so its
     // compare can decide adoption after the request's window closes.
     inFlightSince = null;
-    adoptSettings(acknowledged, isAdoptable);
+    adoptFields(acknowledged, isAdoptable);
     machine.saveAcknowledged({ ...answered, ...submitted }, answered);
 
     const created = identity.id === null;
     identity = { id: result.id, updatedAt: result.updatedAt };
+    requiresUpdatedAt = true;
     status = result.status;
     publishedAt = result.post.published_at ?? null;
     if (publishedAtEditedAt <= prepared.builtAtVersion) {
@@ -809,6 +893,12 @@ export function createEditorSession({
     if (created) {
       withLocalRevisions((writer) => writer.created());
       onIdAcquired(result.id);
+    }
+    // The save has landed whatever the caller does with its answer.
+    try {
+      onSaveAcknowledged?.(result.post);
+    } catch (error) {
+      onError(error);
     }
     // A waiting copy is stale once nothing is unsaved or the post left draft; a new
     // post's unsaved work is written again under the id it now has.
@@ -828,6 +918,7 @@ export function createEditorSession({
     prepare,
     execute,
     reconcile,
+    confirm,
     autosaveDebounceMs,
     onStateChange: (next) => {
       if (next.kind === 'error' || next.kind === 'conflict') {
@@ -1027,26 +1118,31 @@ export function createEditorSession({
         ? engine.dispatch('settings', { retry: true })
         : engine.dispatch('explicit');
     },
+    invalidField: liveInvalidField,
     dispatchPublish: (options) => engine.dispatch('publish', options),
     dispatchSchedule: (options) => engine.dispatch('schedule', options),
     dispatchRevert: () => engine.dispatch('revert'),
     getLiveLexical: () => live.lexical,
 
     recordRefetched: (next) => {
+      if (disposed || identity.id !== next.id) {
+        return false;
+      }
       // Another version's content is not in this document: holding its token
       // would let the next save overwrite it instead of colliding.
-      if (
-        disposed ||
-        identity.id !== next.id ||
-        !isHeldToken(next.updated_at, identity.updatedAt)
-      ) {
+      if (!isHeldToken(next.updated_at, identity.updatedAt)) {
+        const token = next.updated_at ?? null;
+        if (isLaterToken(token, identity.updatedAt) && !isLaterToken(newerVersion, token)) {
+          newerVersion = token;
+          notifyChanged();
+        }
         return false;
       }
       // Decide against the old saved copy before the refetch replaces it.
-      const adoptable = new Set(SETTINGS_FIELD_KEYS.filter(isAdoptable));
+      const adoptable = new Set(ADOPTED_KEYS.filter(isAdoptable));
       const projection = projectionOf(next);
       tracker.setSaved(next.id, projection);
-      adoptSettings(projection, (key) => adoptable.has(key));
+      adoptFields(projection, (key) => adoptable.has(key));
       status = next.status ?? status;
       publishedAt = next.published_at ?? null;
       releaseSavedPublishTime();
@@ -1105,6 +1201,8 @@ export function createEditorSession({
             status,
             engineState: engine.getState().kind,
             reasons: tracker.verdict().reasons.map((reason) => reason.code),
+            dirtyFields: tracker.dirtyFields(),
+            bodyDiff: tracker.bodyDivergence(),
           });
         } catch (error) {
           onError(error);

@@ -4,14 +4,18 @@ import {
   appearanceMenuItem,
   darkAppearanceOption,
   ghostProLink,
+  helpMenuItem,
   lightAppearanceOption,
   networkNotificationBadge,
+  pinSidebarButton,
   postsToggle,
   profileMenuItem,
   signOutMenuItem,
   systemAppearanceOption,
   themeErrorsBannerText,
   themeErrorsDialog,
+  unpinSidebarButton,
+  upgradeNowLink,
   userMenuTrigger,
 } from '@tryghost/test-data/selectors/sidebar';
 
@@ -31,6 +35,8 @@ export const sidebarScreen = {
   // detail breadcrumb) repeats the same link names.
   navLink: (name: string) => sidebarScreen.shellNav().getByRole('link', { name, exact: true }),
   ghostProLink: () => sidebarScreen.navLink(ghostProLink),
+  /** The trial upgrade banner's call to action. */
+  upgradeNowLink: () => sidebarScreen.shellNav().getByRole('link', { name: upgradeNowLink }),
   /** A saved view's colour, from the dot beside its name; `undefined` when it has none. */
   viewColor: (name: string) =>
     sidebarScreen
@@ -38,10 +44,23 @@ export const sidebarScreen = {
       .query()
       ?.querySelector('[data-color]')
       ?.getAttribute('data-color') ?? undefined,
+  /** The admin7Design floating sidebar's state (`closed`, `open` or `pinned`); `undefined` for the docked sidebar. */
+  floatingState: () =>
+    sidebarScreen
+      .shellNav()
+      .query()
+      ?.querySelector('[data-slot=floating-sidebar]')
+      ?.getAttribute('data-state') ?? undefined,
+  /** The floating sidebar's closed circle, named after the site. */
+  floatingTrigger: (siteTitle: string) =>
+    sidebarScreen.shellNav().getByRole('button', { name: siteTitle, exact: true }),
+  pinButton: () => sidebarScreen.shellNav().getByRole('button', { name: pinSidebarButton }),
+  unpinButton: () => sidebarScreen.shellNav().getByRole('button', { name: unpinSidebarButton }),
   postsToggle: () => page.getByRole('button', { name: postsToggle }),
   networkBadge: () => page.getByTestId(networkNotificationBadge),
   userMenuTrigger: () => page.getByRole('button', { name: userMenuTrigger }),
   profileMenuItem: () => page.getByRole('menuitem', { name: profileMenuItem }),
+  helpMenuItem: () => page.getByRole('menuitem', { name: helpMenuItem }),
   signOutMenuItem: () => page.getByRole('menuitem', { name: signOutMenuItem }),
   appearanceMenuItem: () => page.getByRole('menuitem', { name: appearanceMenuItem }),
   appearanceOption: (option: 'dark' | 'light' | 'system') =>

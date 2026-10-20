@@ -1,6 +1,8 @@
 import type { InfiniteData } from '@tanstack/react-query';
 import ObjectId from 'bson-objectid';
+import { useMemo } from 'react';
 import { z } from 'zod';
+import { apiUrl } from '../utils/api/fetch-api';
 import {
   Meta,
   createInfiniteQuery,
@@ -10,7 +12,7 @@ import {
 } from '../utils/api/hooks';
 import type { ReadonlyDeep } from 'type-fest';
 
-export type AutomationStatus = 'active' | 'inactive';
+export type AutomationStatus = 'active' | 'inactive' | 'archived';
 export const MAX_AUTOMATION_ACTIONS = 50;
 
 export type Automation = {
@@ -66,19 +68,34 @@ export type AutomationEdge = {
   target_action_id: string;
 };
 
-export type AutomationDetail = Automation & {
-  created_at: string;
-  updated_at: string;
-  actions: AutomationAction[];
-  edges: AutomationEdge[];
-};
+export type AutomationTrigger =
+  | {
+      trigger_tier_scope: 'free' | 'all_paid' | null;
+      trigger_tier_ids: null;
+    }
+  | {
+      trigger_tier_scope: 'selected_paid';
+      trigger_tier_ids: readonly string[];
+    };
 
-export type EditAutomationPayload = {
+export type AutomationDetail = Automation &
+  AutomationTrigger & {
+    created_at: string;
+    updated_at: string;
+    actions: AutomationAction[];
+    edges: AutomationEdge[];
+  };
+
+export type EditAutomationPayload = AutomationTrigger & {
   id: string;
+  name: string;
+  description: string;
   status: AutomationStatus;
   actions: AutomationAction[];
   edges: AutomationEdge[];
 };
+
+type AutomationStatusPayload = Pick<EditAutomationPayload, 'id' | 'status'>;
 
 export interface AutomationsResponseType {
   meta?: Meta;
@@ -206,11 +223,15 @@ export const AutomationRunsResponseSchema = z.object({
       'Run IDs must be unique',
     ),
   meta: z.object({
-    pagination: z.object({
-      state: z.enum(['scanning', 'more', 'exhausted']).optional(),
-      limit: z.number().int().positive(),
-      next_cursor: z.string().min(1).nullable(),
-    }),
+    pagination: z
+      .object({
+        state: z.enum(['scanning', 'more', 'exhausted']).optional(),
+        limit: z.number().int().positive(),
+        next_cursor: z.string().min(1).nullable(),
+      })
+      .refine((pagination) => pagination.state !== 'scanning' || pagination.next_cursor !== null, {
+        message: 'Scanning requires a continuation cursor',
+      }),
   }),
 });
 
@@ -218,7 +239,7 @@ export type AutomationRun = z.infer<typeof AutomationRunSchema>;
 export type AutomationRunStatusFilter = AutomationRun['status'];
 export type AutomationRunsResponseType = z.infer<typeof AutomationRunsResponseSchema>;
 
-type AutomationRunsResult = { runs: AutomationRun[]; scanning: boolean; pages: number };
+type AutomationRunsResult = { runs: AutomationRun[]; scanning: boolean };
 
 export const useBrowseAutomationRuns = (
   id: string,
@@ -227,11 +248,30 @@ export const useBrowseAutomationRuns = (
     ReturnType<typeof createInfiniteQuery<AutomationRunsResult, AutomationRunsResponseType>>
   >[0],
 ) => {
+  const path = `/automations/${id}/runs/`;
+  const url = apiUrl(path, options?.searchParams);
+  const seenCursors = useMemo(() => new Set<string>(), [queryScope, url]);
   // A new list interaction fetches fresh data even if an earlier request is still pending.
   const useQuery = createInfiniteQuery<AutomationRunsResult, AutomationRunsResponseType>({
     dataType: `AutomationRunsResponseType:${queryScope}`,
-    path: `/automations/${id}/runs/`,
-    parseResponse: (data) => AutomationRunsResponseSchema.parse(data),
+    path,
+    parseResponse: (data, params) => {
+      const response = AutomationRunsResponseSchema.parse(data);
+      // Refetch starts a new traversal; retrying a failed later page keeps its history.
+      if (!params.cursor) {
+        seenCursors.clear();
+      } else {
+        seenCursors.add(params.cursor);
+      }
+      const cursor = response.meta.pagination.next_cursor;
+      if (cursor) {
+        if (seenCursors.has(cursor)) {
+          throw new Error('Automation run pagination repeated a cursor');
+        }
+        seenCursors.add(cursor);
+      }
+      return response;
+    },
     returnData: (originalData) => {
       const { pages } = originalData as InfiniteData<AutomationRunsResponseType>;
       // Pages are live reads, not a snapshot; show a run once if a later page repeats it.
@@ -248,7 +288,6 @@ export const useBrowseAutomationRuns = (
       return {
         runs,
         scanning: pages.at(-1)?.meta.pagination.state === 'scanning',
-        pages: pages.length,
       };
     },
     defaultNextPageParams: (page, params) => {
@@ -283,24 +322,56 @@ const serializeEditableAction = (action: AutomationAction): AutomationAction => 
   }
 };
 
+const serializeEditableAutomation = ({
+  name,
+  description,
+  trigger_tier_scope: triggerTierScope,
+  trigger_tier_ids: triggerTierIds,
+  status,
+  actions,
+  edges,
+}: Partial<Omit<EditAutomationPayload, 'id'>> & Pick<EditAutomationPayload, 'status'>) => ({
+  automations: [
+    {
+      name,
+      description,
+      trigger_tier_scope: triggerTierScope,
+      trigger_tier_ids: triggerTierIds,
+      status,
+      actions: actions?.map(serializeEditableAction),
+      edges,
+    },
+  ],
+});
+
+export const useAddAutomation = createMutation<
+  AutomationDetailResponseType,
+  Omit<EditAutomationPayload, 'id'>
+>({
+  method: 'POST',
+  path: () => '/automations/',
+  body: serializeEditableAutomation,
+  invalidateQueries: { dataType },
+});
+
 export const useEditAutomation = createMutation<
   AutomationDetailResponseType,
   EditAutomationPayload
 >({
   method: 'PUT',
   path: ({ id }) => `/automations/${id}/`,
-  body: ({ status, actions, edges }) => ({
-    automations: [
-      {
-        status,
-        actions: actions.map(serializeEditableAction),
-        edges,
-      },
-    ],
-  }),
-  invalidateQueries: {
-    dataType,
-  },
+  body: serializeEditableAutomation,
+  invalidateQueries: { dataType },
+});
+
+export const useSetAutomationStatus = createMutation<
+  AutomationDetailResponseType,
+  AutomationStatusPayload
+>({
+  method: 'PUT',
+  path: ({ id }) => `/automations/${id}/`,
+  body: serializeEditableAutomation,
+  invalidateQueries: { dataType },
 });
 
 export const usePreviewAutomationEmail = createMutation<

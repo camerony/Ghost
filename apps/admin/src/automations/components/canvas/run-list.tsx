@@ -1,11 +1,12 @@
 import type { PerformanceDateRange } from '@/automations/utils/performance-date-range';
-import React, { forwardRef, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { forwardRef, useEffect, useState } from 'react';
 import type {
   AutomationRun,
   AutomationRunStatusFilter,
 } from '@tryghost/admin-x-framework/api/automations';
 import {
   Button,
+  EmptyIndicator,
   Skeleton,
   Table,
   TableBody,
@@ -15,12 +16,13 @@ import {
   TableHeader,
   TableRow,
 } from '@tryghost/shade/components';
-import { Inline, Stack, Text } from '@tryghost/shade/primitives';
+import { Box, Grid, Inline, Stack, Text } from '@tryghost/shade/primitives';
 import { LucideIcon, cn } from '@tryghost/shade/utils';
 import { useAutomationRuns } from '@/automations/hooks/use-automation-runs';
 import { useInfiniteVirtualScroll } from '@/shared/virtual-list';
 import { mapAutomationRun } from '@/automations/utils/automation-runs';
 import type { RunSortDirection } from '@/automations/types';
+import { useStickyRunSummary } from './use-sticky-run-summary';
 import { CompletedGlyph, ExitedGlyph, InProgressGlyph } from './run-status-icons';
 
 const ROW_HEIGHT = 72;
@@ -59,52 +61,76 @@ const PlaceholderRow = forwardRef<HTMLTableRowElement, { 'data-index': number }>
   },
 );
 
-const RunRow = forwardRef<HTMLTableRowElement, { run: AutomationRun; 'data-index': number }>(
-  function RunRow({ run: data, ...props }, ref) {
-    const run = mapAutomationRun(data);
-    const { Icon, color } = statusIcons[run.status];
-    return (
-      <TableRow ref={ref} {...props}>
-        <TableCell className="h-[72px] p-4">
-          <Stack className="min-w-0" gap="none">
-            <span className="truncate font-medium" title={run.memberName}>
-              {run.memberName}
-            </span>
-            {run.memberEmail && (
-              <span className="truncate text-muted-foreground" title={run.memberEmail}>
-                {run.memberEmail}
-              </span>
-            )}
-          </Stack>
-        </TableCell>
-        <TableCell className="p-4">
-          <time className="block truncate" dateTime={run.enteredAt} title={run.enteredDescription}>
-            {run.enteredLabel}
-          </time>
-        </TableCell>
-        <TableCell className="p-4 text-center">
-          <Inline
-            aria-label={run.statusLabel}
-            as="span"
-            justify="center"
-            role="img"
-            title={run.statusLabel}
+const RunRow = forwardRef<
+  HTMLTableRowElement,
+  {
+    run: AutomationRun;
+    'data-index': number;
+    selectedRunId: string | null;
+    onSelectRun: (id: string, memberName: string) => void;
+    isSelectionDisabled: boolean;
+  }
+>(function RunRow({ run: data, selectedRunId, onSelectRun, isSelectionDisabled, ...props }, ref) {
+  const run = mapAutomationRun(data);
+  const { Icon, color } = statusIcons[run.status];
+  return (
+    <TableRow
+      ref={ref}
+      {...props}
+      className={isSelectionDisabled ? undefined : 'cursor-pointer'}
+      data-state={selectedRunId === run.id ? 'selected' : undefined}
+      onClick={() => {
+        if (!isSelectionDisabled) {
+          onSelectRun(run.id, run.memberName);
+        }
+      }}
+    >
+      <TableCell className="h-[72px] p-4">
+        <Stack className="min-w-0" gap="none">
+          <button
+            aria-label={`View run history for ${run.memberName}, started ${run.enteredDescription}`}
+            aria-pressed={selectedRunId === run.id}
+            className="truncate text-left font-medium outline-offset-4 focus-visible:outline-2 focus-visible:outline-focus-ring"
+            disabled={isSelectionDisabled}
+            title={run.memberName}
+            type="button"
           >
-            <span className="relative">
-              <Icon aria-hidden="true" className={`size-4 ${color}`} />
-              {run.failed && (
-                <span
-                  aria-hidden="true"
-                  className="absolute -top-1 -right-1 size-1.5 rounded-full bg-state-danger"
-                />
-              )}
+            {run.memberName}
+          </button>
+          {run.memberEmail && (
+            <span className="truncate text-muted-foreground" title={run.memberEmail}>
+              {run.memberEmail}
             </span>
-          </Inline>
-        </TableCell>
-      </TableRow>
-    );
-  },
-);
+          )}
+        </Stack>
+      </TableCell>
+      <TableCell className="p-4">
+        <time className="block truncate" dateTime={run.enteredAt} title={run.enteredDescription}>
+          {run.enteredLabel}
+        </time>
+      </TableCell>
+      <TableCell className="p-4 text-center">
+        <Inline
+          aria-label={run.statusLabel}
+          as="span"
+          justify="center"
+          role="img"
+          title={run.statusLabel}
+        >
+          <span className="relative">
+            <Icon aria-hidden="true" className={`size-4 ${color}`} />
+            {run.failed && (
+              <span
+                aria-hidden="true"
+                className="absolute -top-1 -right-1 size-1.5 rounded-full bg-state-danger"
+              />
+            )}
+          </span>
+        </Inline>
+      </TableCell>
+    </TableRow>
+  );
+});
 
 export const RunList: React.FC<{
   automationId: string;
@@ -114,15 +140,25 @@ export const RunList: React.FC<{
   queryScope: string;
   dateRange: PerformanceDateRange;
   status: AutomationRunStatusFilter | null;
+  selectedRunId: string | null;
+  onSelectRun: (id: string, memberName: string) => void;
+  isSelectionDisabled: boolean;
   direction: RunSortDirection;
   onDirectionChange: (direction: RunSortDirection) => void;
+  summary: React.ReactNode;
+  stickySummary: React.ReactNode;
 }> = ({
   automationId,
+  summary,
+  stickySummary,
   queryScope,
   status,
   dateRange,
   direction,
   onDirectionChange,
+  selectedRunId,
+  onSelectRun,
+  isSelectionDisabled,
   search = '',
   enabled = true,
   updating = false,
@@ -137,8 +173,6 @@ export const RunList: React.FC<{
     isNextPageError,
     loadMore,
     scanning,
-    paused,
-    continueSearch,
   } = useAutomationRuns(
     automationId,
     status,
@@ -159,18 +193,25 @@ export const RunList: React.FC<{
     return () => window.clearTimeout(timeout);
   }, [isLoading]);
   const loadingVisible = isLoading && showLoading;
-  let emptyMessage = 'No entries yet';
-  if (search || status) {
-    emptyMessage = 'No matching entries';
-  } else if (dateRange.value !== 'all') {
-    emptyMessage = 'No entries in this period';
-  }
+  const isFiltered = !!search || status !== null || dateRange.value !== 'all';
 
   const SortIcon = direction === 'asc' ? LucideIcon.ArrowUp : LucideIcon.ArrowDown;
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const {
+    scrollRef,
+    summaryRef,
+    headerRef,
+    stickyBarRef,
+    compactSummaryRef,
+    summaryHidden,
+    showStickySummary,
+    scrollMargin,
+    onScroll,
+  } = useStickyRunSummary({ queryScope, dateRange, hasStickySummary: !!stickySummary });
+
   const items = runs ?? [];
+  const isScanning = scanning && !isError && !isNextPageError && !updating;
   // One extra row loads the next page without reserving space for unloaded history.
-  const totalItems = items.length + (canLoadMore ? 1 : 0);
+  const totalItems = items.length + (canLoadMore || isScanning ? 1 : 0);
   const { visibleItems, spaceBefore, spaceAfter } = useInfiniteVirtualScroll({
     items,
     totalItems,
@@ -180,26 +221,55 @@ export const RunList: React.FC<{
     fetchNextPage: loadMore,
     estimateSize: () => ROW_HEIGHT,
     overscan: 10,
+    scrollMargin,
     getScrollElement: (element) => element,
   });
-  useLayoutEffect(() => {
-    scrollRef.current?.scrollTo({ top: 0 });
-  }, [queryScope, dateRange]);
+
   return (
-    <Stack
-      aria-busy={isLoading}
-      aria-label="Automation runs"
-      className="min-h-[216px] flex-1"
-      gap="sm"
-      role="region"
+    <div
+      ref={scrollRef}
+      className="min-h-0 flex-1 overflow-y-auto"
+      data-testid="automation-runs-scroll"
+      style={{ overflowAnchor: 'none' }}
+      onScroll={onScroll}
     >
-      <div
-        ref={scrollRef}
-        className="min-h-0 flex-1 overflow-y-auto"
-        data-testid="automation-runs-scroll"
+      <Box
+        ref={summaryRef}
+        aria-hidden={summaryHidden || undefined}
+        className={summary ? 'pb-4' : undefined}
+      >
+        {summary}
+      </Box>
+      <Box
+        ref={stickyBarRef}
+        className={cn(
+          'sticky top-0 z-20 bg-surface-elevated',
+          showStickySummary && 'border-b border-border-default pb-4',
+        )}
+      >
+        <Grid
+          ref={compactSummaryRef}
+          aria-hidden={!showStickySummary || undefined}
+          className={cn(
+            'transition-[grid-template-rows,opacity] duration-200 ease-out motion-reduce:transition-none',
+            showStickySummary ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
+          )}
+          gap="none"
+        >
+          <Box className="min-h-0 overflow-hidden">{stickySummary}</Box>
+        </Grid>
+      </Box>
+      <Box
+        aria-busy={isLoading || isLoadingMore || isScanning}
+        aria-label="Automation runs"
+        role="region"
       >
         <Table aria-label="Automation runs" className="table-fixed">
-          <TableHeader className="sticky top-0 z-10 bg-surface-elevated">
+          <TableHeader
+            ref={headerRef}
+            className="sticky z-10 bg-surface-elevated"
+            style={{ top: 'var(--sticky-status-height, 0px)' }}
+          >
             <TableRow>
               <TableHead className="px-4" scope="col">
                 <Inline gap="xs">
@@ -222,7 +292,7 @@ export const RunList: React.FC<{
                   type="button"
                   onClick={() => onDirectionChange(direction === 'asc' ? 'desc' : 'asc')}
                 >
-                  Entered <SortIcon aria-hidden="true" />
+                  Started <SortIcon aria-hidden="true" />
                 </TableHeadButton>
               </TableHead>
               <TableHead className="w-20 px-4" scope="col">
@@ -241,7 +311,16 @@ export const RunList: React.FC<{
               if (virtualItem.index > items.length - 1) {
                 return <PlaceholderRow key={key} {...props} />;
               }
-              return <RunRow key={item.id} run={item} {...props} />;
+              return (
+                <RunRow
+                  key={item.id}
+                  isSelectionDisabled={isSelectionDisabled}
+                  run={item}
+                  selectedRunId={selectedRunId}
+                  onSelectRun={onSelectRun}
+                  {...props}
+                />
+              );
             })}
             <SpacerRow height={spaceAfter} />
           </TableBody>
@@ -256,32 +335,29 @@ export const RunList: React.FC<{
             Updating automation runs
           </Text>
         )}
-        {isLoadingMore && (
+        {(isLoadingMore || isScanning) && (
           <Text className="sr-only" role="status">
-            Loading more entries
+            Loading more runs
           </Text>
         )}
         {!isLoading && !isError && !scanning && !isNextPageError && runs?.length === 0 && (
-          <Text className="px-4 py-6 text-center" role="status" size="sm" tone="secondary">
-            {emptyMessage}
-          </Text>
-        )}
-        {scanning && !isError && !isNextPageError && !updating && (
-          <Stack className="px-4 py-3" gap="sm">
-            <Text role="status" size="sm" tone="secondary">
-              {paused ? 'Search paused. Continue to find more entries' : 'Searching more entries…'}
-            </Text>
-            {paused && (
-              <Button className="self-start" size="sm" variant="outline" onClick={continueSearch}>
-                Continue search
-              </Button>
-            )}
-          </Stack>
+          <EmptyIndicator
+            className="px-4 py-12"
+            description={
+              isFiltered
+                ? 'Try a different search or filter'
+                : "Once someone starts your automation, they'll show here"
+            }
+            role="status"
+            title={isFiltered ? 'No members match' : 'No members yet'}
+          >
+            <LucideIcon.Users />
+          </EmptyIndicator>
         )}
         {isError && (
           <Stack className="px-4 py-6" gap="sm" role="alert">
             <Text size="sm" tone="secondary">
-              Could not load automation runs
+              Could not load runs
             </Text>
             <Button className="self-start" size="sm" variant="outline" onClick={retry}>
               Retry
@@ -291,14 +367,14 @@ export const RunList: React.FC<{
         {isNextPageError && (
           <Stack className="px-4 py-6" gap="sm" role="alert">
             <Text size="sm" tone="secondary">
-              Could not load more runs
+              Could not load runs
             </Text>
             <Button className="self-start" size="sm" variant="outline" onClick={loadMore}>
               Retry
             </Button>
           </Stack>
         )}
-      </div>
-    </Stack>
+      </Box>
+    </div>
   );
 };

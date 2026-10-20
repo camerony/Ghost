@@ -38,7 +38,12 @@ describe('createEditorSession reporting', () => {
     expect(failures).toHaveLength(1);
     expect(failures[0]).toMatchObject({
       command: { kind: 'explicit', requiresRevision: true, requiresReconfirmation: false },
-      error: { kind: 'conflict', message: collision.message, cause: collision },
+      // Core's reason, not the transport's summary of the request.
+      error: {
+        kind: 'conflict',
+        message: 'Saving failed! Someone else is editing this post.',
+        cause: collision,
+      },
       persisted: true,
       postId: 'abc123',
       status: 'published',
@@ -90,12 +95,16 @@ describe('createEditorSession reporting', () => {
 
     expect(await session.leaveRequested()).toBe('confirm');
 
+    // A body this short is reported by offset only.
+    const edit: unknown = expect.objectContaining({ before: '', live: '', other: '' });
     expect(leaves).toEqual([
       {
         postId: 'abc123',
         status: 'published',
         engineState: 'conflict',
         reasons: ['POST_HAS_ERROR', 'SCRATCH_DIVERGED_FROM_SECONDARY'],
+        dirtyFields: ['lexical'],
+        bodyDiff: { saved: edit, baseline: edit },
       },
     ]);
   });

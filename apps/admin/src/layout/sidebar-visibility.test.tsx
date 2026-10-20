@@ -6,32 +6,20 @@ type RouteMatch = {
 };
 
 const useMatchesMock = vi.fn<() => RouteMatch[]>();
-const useEmberSidebarVisibilityMock = vi.fn<() => boolean>();
-const syncEmberFullScreenMock = vi.fn<(isFullScreen: boolean) => () => void>();
+const useIsMobileMock = vi.fn<() => boolean>();
 
 vi.mock('@tryghost/admin-x-framework', () => ({
   useMatches: () => useMatchesMock(),
 }));
 
-vi.mock('@/ember-bridge', () => ({
-  syncEmberFullScreen: (isFullScreen: boolean) => syncEmberFullScreenMock(isFullScreen),
-  useSidebarVisibility: () => useEmberSidebarVisibilityMock(),
+vi.mock('@tryghost/shade/utils', () => ({
+  useIsMobile: () => useIsMobileMock(),
 }));
 
 describe('useAdminSidebarVisibility', () => {
   beforeEach(() => {
     useMatchesMock.mockReturnValue([]);
-    useEmberSidebarVisibilityMock.mockReturnValue(true);
-  });
-
-  it('uses the Ember sidebar visibility by default', async () => {
-    const { useAdminSidebarVisibility } = await import('./sidebar-visibility');
-
-    useEmberSidebarVisibilityMock.mockReturnValue(false);
-
-    const { result } = renderHook(() => useAdminSidebarVisibility());
-
-    expect(result.current).toBe(false);
+    useIsMobileMock.mockReturnValue(false);
   });
 
   it('hides the sidebar when any matched React route opts out', async () => {
@@ -56,24 +44,17 @@ describe('useAdminSidebarVisibility', () => {
 
     expect(result.current).toBe(true);
   });
-});
 
-describe('useSyncEmberFullScreen', () => {
-  it('publishes whether a matched route hides the sidebar', async () => {
-    const { useSyncEmberFullScreen } = await import('./sidebar-visibility');
-    const stopSync = vi.fn();
-    syncEmberFullScreenMock.mockReturnValue(stopSync);
+  it('keeps the sidebar visible in Settings on desktop and hides it on mobile', async () => {
+    const { useAdminSidebarVisibility } = await import('./sidebar-visibility');
 
-    useMatchesMock.mockReturnValue([{}, { handle: { hideAdminSidebar: true } }]);
-    const { rerender } = renderHook(() => useSyncEmberFullScreen());
+    useMatchesMock.mockReturnValue([{ handle: { settingsSidebar: true } }]);
 
-    expect(syncEmberFullScreenMock).toHaveBeenCalledExactlyOnceWith(true);
+    const { result, rerender } = renderHook(() => useAdminSidebarVisibility());
+    expect(result.current).toBe(true);
 
-    useMatchesMock.mockReturnValue([{}, { handle: { allowInForceUpgrade: true } }]);
+    useIsMobileMock.mockReturnValue(true);
     rerender();
-
-    expect(stopSync).toHaveBeenCalledOnce();
-    expect(syncEmberFullScreenMock).toHaveBeenCalledTimes(2);
-    expect(syncEmberFullScreenMock).toHaveBeenLastCalledWith(false);
+    expect(result.current).toBe(false);
   });
 });

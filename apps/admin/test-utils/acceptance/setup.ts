@@ -1,5 +1,7 @@
-import { afterEach, beforeAll } from 'vitest';
+import { afterEach, beforeAll, beforeEach } from 'vitest';
+import { page, userEvent } from 'vitest/browser';
 import { cleanup } from 'vitest-browser-react';
+import { toast } from 'sonner';
 
 import './matchers';
 import { defaultBootResolver, defaultBootRoutes } from './boot';
@@ -12,6 +14,7 @@ import {
 } from './worker';
 import { resetDeclaredResources } from './resources';
 import { guardFrameNavigations, resetFakeFrameOrigins } from './frames';
+import { resetModuleRoutes } from './module-loads';
 
 // At import, before the spec module (and the app) loads.
 trackIssuedRequests();
@@ -30,8 +33,43 @@ beforeAll(async () => {
   }`;
   document.head.appendChild(style);
 
+  // Journeys end, and the app unmounts, as soon as a navigation lands, often
+  // while its view transition still waits on the new screen. The real API then
+  // times the transition out and reports an unhandled TimeoutError, so run the
+  // update straight away instead: no snapshots, nothing left pending to time out.
+  document.startViewTransition = (
+    update?: ViewTransitionUpdateCallback | StartViewTransitionOptions,
+  ) => {
+    const callback = typeof update === 'function' ? update : update?.update;
+    const updateCallbackDone = Promise.resolve().then(async () => {
+      await callback?.();
+    });
+    return {
+      ready: updateCallbackDone,
+      finished: updateCallbackDone,
+      updateCallbackDone,
+      skipTransition() {},
+      types: new Set<string>(),
+    };
+  };
+
   await startFakeApi({ resolver: defaultBootResolver, routes: defaultBootRoutes() });
   await guardFrameNavigations();
+});
+
+beforeEach(async () => {
+  // The editor hides its chrome while the writer types and brings it back once the
+  // pointer travels. A writer's pointer always comes from somewhere, but Chromium
+  // reports no travel for a page's first pointer event or for a click where the
+  // pointer already rests, so each test starts with it parked in the corner.
+  const corner = document.createElement('div');
+  corner.style.cssText = 'position:fixed;top:0;left:0;width:20px;height:20px;z-index:2147483647';
+  document.body.appendChild(corner);
+  try {
+    await userEvent.hover(page.elementLocator(corner));
+  } finally {
+    corner.remove();
+  }
 });
 
 afterEach(async () => {
@@ -44,20 +82,43 @@ afterEach(async () => {
   try {
     await settleRequests();
   } finally {
-    resetFakeApi();
-    resetDeclaredResources();
-    sessionStorage.clear();
-    // The editor keeps local copies of drafts here, and the restore screen lists them all.
-    for (const key of Object.keys(localStorage)) {
-      if (key.startsWith('post-revision-')) {
-        localStorage.removeItem(key);
-      }
-    }
-    window.location.hash = '';
     try {
-      await resetFakeFrameOrigins();
+      const activeToasts = toast.getToasts();
+      for (const activeToast of activeToasts) {
+        // A save can emit a toast while requests drain after unmount. Dismiss
+        // each id to mark it dismissed in Sonner's module-level store too.
+        toast.dismiss(activeToast.id);
+      }
+      if (activeToasts.length > 0) {
+        // Drain Sonner's queued publications before the next test mounts a
+        // subscriber or reuses an id.
+        await new Promise<void>((resolve) => {
+          requestAnimationFrame(() => resolve());
+        });
+      }
     } finally {
-      verifyNoUnhandledRequests();
+      resetFakeApi();
+      resetDeclaredResources();
+      // A journey can end mid screen transition; its markers would hide the next app's content.
+      delete document.documentElement.dataset.screenExit;
+      delete document.documentElement.dataset.screenTransition;
+      sessionStorage.clear();
+      // The editor keeps local copies of drafts here, and the restore screen lists them all.
+      for (const key of Object.keys(localStorage)) {
+        if (key.startsWith('post-revision-')) {
+          localStorage.removeItem(key);
+        }
+      }
+      // Where the writer last left the editor's settings panel.
+      localStorage.removeItem('ghost-editor-settings-open');
+      // Each draft's remembered newsletter.
+      localStorage.removeItem('ghost-editor-draft-newsletters');
+      window.location.hash = '';
+      try {
+        await Promise.all([resetFakeFrameOrigins(), resetModuleRoutes()]);
+      } finally {
+        verifyNoUnhandledRequests();
+      }
     }
   }
 });

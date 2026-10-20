@@ -2,6 +2,7 @@ import { vi } from 'vitest';
 import { deferred, type Deferred } from '@/utils/deferred';
 import {
   createSaveEngine,
+  type ConfirmOutcome,
   type DispatchIntent,
   type PrepareOutcome,
   type SaveEngine,
@@ -64,6 +65,7 @@ export function setup(
   ports: {
     autosaveDebounceMs?: () => number | undefined;
     onSaveFailed?: (failure: SaveFailure) => void;
+    confirm?: (prepared: SaveRequest, signal: AbortSignal) => Promise<ConfirmOutcome>;
   } = {},
 ) {
   let snapshot = { ...BASE, ...overrides } as SaveSnapshot;
@@ -230,6 +232,7 @@ export const hostLimit: SaveError = { kind: 'host-limit', message: 'Upgrade requ
 export const transport: SaveError = { kind: 'transport', message: 'Server unreachable' };
 export const sessionInvalid: SaveError = { kind: 'session-invalid', message: 'Unauthorized' };
 export const notFound: SaveError = { kind: 'not-found', message: 'Post not found' };
+export const forbidden: SaveError = { kind: 'forbidden', message: 'Permission error' };
 export const conflict: SaveError = {
   kind: 'conflict',
   message: 'Someone else is editing this post',

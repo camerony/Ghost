@@ -16,47 +16,34 @@ import { Inline, Text } from '@tryghost/shade/primitives';
 import {
   editorConflictBanner,
   editorConflictReloadConfirm,
-  editorSaveErrorBanner,
+  editorNewerVersionNotice,
 } from '@tryghost/test-data/selectors/editor';
 import type { PendingSave, SaveError, SaveEngineState } from '@/editor/engine/save-engine';
 import { EDITOR_CONFIRM_DIALOG_LAYER } from '@/editor/layering';
+import { ErrorLine } from '@/editor/publish/components/failure-banner';
 import { reportShownAlert } from '@/editor/report-error';
+import { POST_DELETED, terminalSaveError } from './error-mapping';
 import type { ReloadOutcome } from './use-editor-session';
 
-const SESSION_EXPIRED = 'Your session expired. Retry to sign in again and save.';
 const CONFLICT =
   'Someone else is editing this post. Reloading replaces what you have with their version, so copy your content first if you need it.';
-const GONE =
-  'This post has been deleted. Copy your content and paste it into a new post to keep it.';
-// A halt carries no error of its own; the banner reports it as the not-found it is.
-const NOT_FOUND: SaveError = { kind: 'not-found', message: GONE };
+const NEWER_VERSION = 'This post was updated elsewhere.';
+const RELOAD_FAILED = 'Couldn’t reload this post';
 
 export interface SessionBannersProps {
   state: SaveEngineState;
   pendingSave?: PendingSave | null;
+  /** A later version was saved elsewhere, and a reload onto it would lose nothing. */
+  newerVersionAvailable?: boolean;
   hasUnsavedContent: () => boolean;
   contentText: () => string;
-  onRetrySave: () => void;
   onReload: () => Promise<ReloadOutcome>;
 }
 
-function saveErrorMessage(error: SaveError): string {
-  switch (error.kind) {
-    case 'session-invalid':
-      return SESSION_EXPIRED;
-    case 'transport':
-      return 'Couldn’t reach the server. Your changes are still here.';
-    default:
-      return error.message;
-  }
-}
-
 // Once per banner the writer reads, not per render of it.
-function useShownAlert(message: string | null, error: SaveError | null): void {
+function useShownAlert(message: string, error: SaveError): void {
   useEffect(() => {
-    if (message !== null && error !== null) {
-      reportShownAlert(message, error);
-    }
+    reportShownAlert(message, error);
   }, [message, error]);
 }
 
@@ -65,7 +52,8 @@ type ConflictBannerProps = Pick<
   'hasUnsavedContent' | 'contentText' | 'onReload'
 > & {
   error: SaveError;
-  deleted?: boolean;
+  /** Saving has stopped for good: the error says why, and copying is the only way out. */
+  stopped?: boolean;
 };
 
 function ConflictBanner({
@@ -73,13 +61,14 @@ function ConflictBanner({
   contentText,
   onReload,
   error,
-  deleted = false,
+  stopped = false,
 }: ConflictBannerProps) {
   const [confirming, setConfirming] = useState(false);
   const [reloading, setReloading] = useState(false);
   const [reloadFoundDeleted, setReloadFoundDeleted] = useState(false);
-  const gone = deleted || reloadFoundDeleted;
-  useShownAlert(gone ? GONE : CONFLICT, gone ? NOT_FOUND : error);
+  const halt = stopped ? error : reloadFoundDeleted ? POST_DELETED : null;
+  const message = halt ? halt.message : CONFLICT;
+  useShownAlert(message, halt ?? error);
 
   const reload = async () => {
     setConfirming(false);
@@ -90,7 +79,7 @@ function ConflictBanner({
       setReloadFoundDeleted(true);
     }
     if (outcome === 'failed') {
-      toast.error('Couldn’t reload this post');
+      toast.error(RELOAD_FAILED);
     }
   };
 
@@ -106,30 +95,31 @@ function ConflictBanner({
   return (
     <>
       <Banner
-        className="mx-4 mb-2 shrink-0 bg-destructive text-destructive-foreground"
+        className="mx-4 mt-3 shrink-0"
         data-testid={editorConflictBanner}
         role="alert"
         size="sm"
         variant="destructive"
       >
         <Inline align="center" gap="sm" justify="center" wrap>
-          <Text className="text-center text-inherit">{gone ? GONE : CONFLICT}</Text>
+          <Text as="div" className="text-center">
+            <ErrorLine className="inline-flex">{message}</ErrorLine>
+          </Text>
           <Inline align="center" gap="sm" justify="center">
-            {!gone && (
+            {!halt && (
               <Button
-                className="border-destructive-foreground/40 text-destructive-foreground hover:bg-destructive-foreground/10 hover:text-destructive-foreground"
                 disabled={reloading}
                 size="sm"
-                variant="outline"
+                variant="destructive"
                 onClick={() => (hasUnsavedContent() ? setConfirming(true) : void reload())}
               >
                 Reload
               </Button>
             )}
             <Button
-              className="text-destructive-foreground hover:bg-destructive-foreground/10 hover:text-destructive-foreground"
+              className="bg-background"
               size="sm"
-              variant="ghost"
+              variant="outline"
               onClick={() => void copyContent()}
             >
               Copy content
@@ -166,63 +156,69 @@ function ConflictBanner({
   );
 }
 
+function NewerVersionNotice({ onReload }: Pick<SessionBannersProps, 'onReload'>) {
+  const [reloading, setReloading] = useState(false);
+
+  const reload = async () => {
+    setReloading(true);
+    const outcome = await onReload();
+    setReloading(false);
+    if (outcome === 'gone' || outcome === 'failed') {
+      toast.error(RELOAD_FAILED);
+    }
+  };
+
+  return (
+    <Banner
+      className="mx-4 mt-3 shrink-0"
+      data-testid={editorNewerVersionNotice}
+      role="status"
+      size="sm"
+      variant="info"
+    >
+      <Inline align="center" gap="sm">
+        <Text>{NEWER_VERSION}</Text>
+        <Button disabled={reloading} size="sm" variant="outline" onClick={() => void reload()}>
+          Reload
+        </Button>
+      </Inline>
+    </Banner>
+  );
+}
+
+/**
+ * The notices above the header for what the status line cannot hold: a
+ * collision or a halt with its ways out, and a newer version. A failed save is
+ * the status line's to report, with its retry; a field held by its rule is
+ * marked beside the field.
+ */
 export function SessionBanners({
   state,
   pendingSave,
+  newerVersionAvailable = false,
   hasUnsavedContent,
   contentText,
-  onRetrySave,
   onReload,
 }: SessionBannersProps) {
-  const saveError = state.kind === 'error' ? state.error : null;
-  useShownAlert(saveError && saveErrorMessage(saveError), saveError);
-
+  const halt = terminalSaveError(state);
   const conflict =
     state.kind === 'conflict'
       ? state.error
-      : state.kind === 'halted'
-        ? NOT_FOUND
-        : pendingSave?.blockedBy?.kind === 'conflict'
-          ? pendingSave.blockedBy
-          : null;
+      : (halt ?? (pendingSave?.blockedBy?.kind === 'conflict' ? pendingSave.blockedBy : null));
   if (conflict) {
     return (
       <ConflictBanner
         contentText={contentText}
-        deleted={state.kind === 'halted'}
         error={conflict}
         hasUnsavedContent={hasUnsavedContent}
+        stopped={halt !== null}
         onReload={onReload}
       />
     );
   }
 
-  // A save that stopped working is never silent: the writer keeps a way to retry.
-  if (state.kind === 'error') {
-    return (
-      <Banner
-        className="mx-4 mb-2 shrink-0"
-        data-testid={editorSaveErrorBanner}
-        role="alert"
-        size="sm"
-        variant="destructive"
-      >
-        <Inline align="center" gap="sm">
-          <Text>{saveErrorMessage(state.error)}</Text>
-          <Button size="sm" variant="outline" onClick={onRetrySave}>
-            Retry
-          </Button>
-        </Inline>
-      </Banner>
-    );
-  }
-
-  if (pendingSave?.blockedBy?.kind === 'validation') {
-    return (
-      <Banner className="mx-4 mb-2 shrink-0" role="status" size="sm" variant="warning">
-        <Text>Changes are waiting to save. {pendingSave.blockedBy.message}</Text>
-      </Banner>
-    );
+  if (newerVersionAvailable) {
+    return <NewerVersionNotice onReload={onReload} />;
   }
 
   return null;

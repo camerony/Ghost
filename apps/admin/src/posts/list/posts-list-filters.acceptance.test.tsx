@@ -6,6 +6,7 @@ import {
   fakeAdminEndpoint,
   fakePosts,
   fakePostsListScreen,
+  fakeTags,
   post,
   renderAdminApp,
   staffRole,
@@ -23,8 +24,7 @@ function asRole(name: StaffRoleName) {
 
 /**
  * The filter bar. What matters most is that chips and the URL stay in lockstep:
- * the five params are what sidebar saved views persist, and the Ember screen
- * reads the same ones while both implementations exist.
+ * the five params are what sidebar saved views persist.
  */
 describe('Posts list filters', () => {
   // The author and tag fields hydrate their selected values as soon as the
@@ -39,6 +39,29 @@ describe('Posts list filters', () => {
 
     await expect.element(postsListScreen.filterBar()).toBeVisible();
     await expect.element(postsListScreen.filterBar()).toHaveTextContent('Draft posts');
+  });
+
+  it('searches tags by name before selecting a post filter', async () => {
+    const news = tag({ name: 'News', slug: 'news' });
+    const halloween = tag({ name: 'Halloween', slug: 'halloween' });
+    fakePosts([]);
+    // Declare the server's response for this search without implementing NQL.
+    const tagsApi = fakeTags(({ filter }) =>
+      filter === "tags.name:~'Halloween'" ? [halloween] : [news, halloween],
+    );
+    fakeAdminEndpoint('GET', /^\/tags\/\?.*slug/, { tags: [halloween] });
+    await renderAdminApp('/posts');
+
+    await postsListScreen.addFilterButton().click();
+    await postsListScreen.filterFieldOption('Tag').click();
+    await expect.element(postsListScreen.filterValueOption('News')).toBeVisible();
+    await postsListScreen.filterSearchInput().fill('Halloween');
+
+    await expect(tagsApi).toHaveSentFilter("tags.name:~'Halloween'");
+    await expect(postsListScreen.filterValueOption('News')).toHaveCount(0);
+    await postsListScreen.filterValueOption('Halloween').click();
+    await expect.element(postsListScreen.filterBar()).toHaveTextContent('Halloween');
+    await expect.poll(currentRoute).toBe('/posts?tag=halloween');
   });
 
   // The slug-to-name lookup is its own request, and `fakeTags` only declares
@@ -66,6 +89,56 @@ describe('Posts list filters', () => {
     await renderAdminApp('/posts?author=ada');
 
     await expect.element(postsListScreen.filterBar()).toHaveTextContent('Ada Lovelace');
+  });
+
+  it('hydrates several types into one chip', async () => {
+    fakePosts([]);
+    await renderAdminApp('/posts?type=draft,published');
+
+    await expect.element(postsListScreen.filterBar()).toHaveTextContent('2 selected');
+    await expect.poll(currentRoute).toBe('/posts?type=draft,published');
+  });
+
+  it('adds a second type to the same chip', async () => {
+    fakePosts([]);
+    await renderAdminApp('/posts?type=draft');
+
+    await postsListScreen.filterValueButton('Draft posts').click();
+    await postsListScreen.filterValueOption('Published posts').click();
+
+    await expect.poll(currentRoute).toBe('/posts?type=draft%2Cpublished');
+  });
+
+  // Featured has a fixed value, so picking it from the menu adds the chip.
+  it('filters by featured alongside type', async () => {
+    fakePosts([]);
+    await renderAdminApp('/posts?type=published');
+
+    await postsListScreen.addFilterButton().click();
+    await postsListScreen.filterFieldOption('Featured').click();
+
+    await expect.element(postsListScreen.filterBar()).toHaveTextContent(/Post\s*is\s*Featured/);
+    await expect.poll(currentRoute).toBe('/posts?type=published&featured=true');
+  });
+
+  it('flips featured to "is not"', async () => {
+    fakePosts([]);
+    await renderAdminApp('/posts?featured=true');
+
+    await postsListScreen.filterValueButton('is').click();
+    await postsListScreen.filterOperatorOption('is not').click();
+
+    await expect.poll(currentRoute).toBe('/posts?featured=false');
+  });
+
+  // Saved views and bookmarks from before featured was its own param.
+  it('shows legacy type=featured as a Featured chip', async () => {
+    fakePosts([]);
+    await renderAdminApp('/posts?type=featured');
+
+    await expect.element(postsListScreen.filterBar()).toHaveTextContent('Featured');
+    await expect.element(postsListScreen.filterBar()).not.toHaveTextContent('Unknown');
+    await expect.poll(currentRoute).toBe('/posts?type=featured');
   });
 
   // A saved view can point at a tag that was later renamed or deleted.
@@ -153,13 +226,14 @@ describe('Posts list filters', () => {
 
   // Ember hides these for roles that can only see their own posts.
   describe('role restrictions', () => {
-    it('offers only the type filter to a contributor', async () => {
+    it('offers only the type and featured filters to a contributor', async () => {
       fakePosts([]);
       await renderAdminApp('/posts', asRole('Contributor'));
 
       await postsListScreen.addFilterButton().click();
 
       await expect.element(postsListScreen.filterFieldOption('Post type')).toBeVisible();
+      await expect.element(postsListScreen.filterFieldOption('Featured')).toBeVisible();
       await expect(postsListScreen.filterFieldOption('Author')).toHaveCount(0);
       await expect(postsListScreen.filterFieldOption('Access')).toHaveCount(0);
       await expect(postsListScreen.filterFieldOption('Tag')).toHaveCount(0);
@@ -175,13 +249,14 @@ describe('Posts list filters', () => {
       await expect(postsListScreen.filterFieldOption('Author')).toHaveCount(0);
     });
 
-    it('offers all four to an administrator', async () => {
+    it('offers every filter to an administrator', async () => {
       fakePosts([]);
       await renderAdminApp('/posts', asRole('Administrator'));
 
       await postsListScreen.addFilterButton().click();
 
       await expect.element(postsListScreen.filterFieldOption('Post type')).toBeVisible();
+      await expect.element(postsListScreen.filterFieldOption('Featured')).toBeVisible();
       await expect.element(postsListScreen.filterFieldOption('Access')).toBeVisible();
       await expect.element(postsListScreen.filterFieldOption('Author')).toBeVisible();
       await expect.element(postsListScreen.filterFieldOption('Tag')).toBeVisible();

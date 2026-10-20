@@ -7,6 +7,7 @@ export {
   fakeEditorChrome,
   fakeEditorPost,
   fakePintura,
+  fakeEmailPreview,
   fakeUnsplashPhotos,
   submittedPost,
   withFastAutosave,
@@ -15,6 +16,7 @@ export {
   withoutUnsplash,
 } from './editor';
 export type { FakePintura } from './editor';
+export { failModuleLoads, holdModuleLoads } from './module-loads';
 export { currentRoute, renderAdminApp } from './render-admin-app';
 export type { RenderAdminAppOptions } from './render-admin-app';
 export { InAppProviders, renderInApp } from './render-in-app';
@@ -36,6 +38,7 @@ export {
   fakePosts,
   fakePostsListScreen,
   fakeRoles,
+  fakeSearchIndex,
   fakeSettingsScreens,
   fakeSnippets,
   fakeTags,
@@ -52,6 +55,8 @@ export type {
   ResourceOptions,
   ResourceSemantics,
   RespondWith,
+  SearchIndexEntry,
+  SearchIndexKind,
 } from './resources';
 export {
   allowUnhandledRequests,
@@ -76,9 +81,24 @@ export {
 } from './tinybird';
 export type { TinybirdPipeCapture, TinybirdPipeQuery } from './tinybird';
 export { fakeAdminStats } from './stats';
-export { fakeFrameOrigin } from './frames';
+export {
+  type AppFramePageKind,
+  appFramePage,
+  callAppFrame,
+  callHostRaw,
+  failFrameOrigin,
+  fakeFrameOrigin,
+  postFrameForm,
+  reloadFrame,
+} from './frames';
+export type {
+  AppFrameFlags,
+  AppFrameReceived,
+  AppFrameResult,
+  AppFrameState,
+} from './app-frame-stand-in';
 export { unsavedChangesGuarded } from './unsaved-changes-guard';
-export { dragByPointer } from './pointer';
+export { dragByPointer, settleTransitions, settleAnimations } from './pointer';
 
 // Test-data re-exports, so a spec needs a single import surface.
 export {

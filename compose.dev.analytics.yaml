@@ -12,6 +12,9 @@ services:
     entrypoint: ['/app/entrypoint.sh']
     expose:
       - '3000'
+    # The Admin dev server proxies /.ghost/analytics/ here
+    ports:
+      - '127.0.0.1:7182:3000'
     healthcheck:
       test:
         [
@@ -28,6 +31,7 @@ services:
     environment:
       - PROXY_TARGET=http://tinybird-local:7181/v0/events
       - TINYBIRD_WAIT=true
+      - TINYBIRD_SYNC_AUTH=${TINYBIRD_SYNC_AUTH:-test-sync-auth}
     depends_on:
       tinybird-local:
         condition: service_healthy
@@ -35,7 +39,7 @@ services:
         condition: service_completed_successfully
 
   tinybird-local:
-    image: tinybirdco/tinybird-local:latest@sha256:9d438ecb6f03b00b024f6a48c824ddc29c81b99829c874a0095648b765c083e6
+    image: tinybirdco/tinybird-local:latest@sha256:c1e2b1cc1f94878192d1c1dd5cda952ceeaa503c0af10d35b3737d1f566a7dad
     container_name: ghost-dev-tinybird
     platform: linux/amd64
     stop_grace_period: 2s
@@ -62,7 +66,7 @@ services:
       - TB_HOST=http://tinybird-local:7181
       - TB_LOCAL_HOST=tinybird-local
     volumes:
-      - ./ghost/core/core/server/data/tinybird:/home/tinybird
+      - ./ghost/core/server/data/tinybird:/home/tinybird
       - shared-config:/mnt/shared-config
     depends_on:
       tinybird-local:
@@ -76,7 +80,7 @@ services:
     entrypoint: ['tb', '--local', 'dev']
     environment: *tb-cli-environment
     volumes:
-      - ./ghost/core/core/server/data/tinybird:/home/tinybird
+      - ./ghost/core/server/data/tinybird:/home/tinybird
     depends_on:
       tb-cli:
         condition: service_completed_successfully
@@ -98,6 +102,7 @@ services:
       tinybird__stats__endpointBrowser: http://localhost:7181
       tinybird__tracker__endpoint: http://localhost:2368/.ghost/analytics/api/v1/page_hit
       tinybird__tracker__datasource: analytics_events
+      tinybird__sync_auth_key: ${TINYBIRD_SYNC_AUTH:-test-sync-auth}
     depends_on:
       analytics:
         condition: service_healthy

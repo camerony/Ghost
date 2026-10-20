@@ -1,4 +1,3 @@
-import { useCallback, useEffect } from 'react';
 import {
   type AdminRouteHandle,
   type RouteObject,
@@ -16,14 +15,18 @@ import { FeatureFlagsProvider, routes as activityPubRoutes } from '@tryghost/act
 import { AnalyticsProvider, analyticsRouteChildren } from './analytics/api';
 import MyProfileRedirect from './my-profile-redirect';
 
-// Ember
-import { EmberFallback, ForceUpgradeGuard, syncEmberRoutePattern } from './ember-bridge';
+import { BillingRoute, ForceUpgradeGuard } from './billing/api';
 import HomeRedirect from './home-redirect';
-import { EditorGate } from './editor-gate';
-import { lazyRestoreScreen } from './editor/api';
-import { useFlagGatedRouteOwner } from './use-flag-gated-route-owner';
+import { lazyEditorScreen, lazyRestoreScreen } from './editor/api';
 import { type AccessRouteHandle } from './route-access';
 import { RouteAccessGuard } from './route-access-guard';
+import {
+  canManageApps,
+  lazyAppDetailsScreen,
+  lazyAppInstallScreen,
+  lazyAppPageScreen,
+  lazyAppsScreen,
+} from './apps/api';
 import { lazyAutomationEditorScreen, lazyAutomationsScreen } from './automations/api';
 import { lazyCommentsScreen } from './comments/api';
 import { lazyMigrateScreen } from './migrate/api';
@@ -36,7 +39,7 @@ import {
   lazyPostsListRoute,
   postAnalyticsRouteChildren,
 } from './posts/api';
-import { canAccessSettingsRoute, lazySettingsScreen, settingsRouteChildren } from './settings/api';
+import { canAccessSettingsRoute, SettingsRoute, settingsRouteChildren } from './settings/api';
 import { lazyTagDetailScreen, lazyTagsScreen } from './tags/api';
 import { lazyViewSiteScreen } from './view-site/api';
 import {
@@ -47,19 +50,7 @@ import {
 } from '@tryghost/admin-x-framework/api/users';
 
 import { NotFound } from './shared/not-found';
-import { type AuthRouteHandle, authRoutes, useAuthScreensOwner } from './auth/api';
-
-// Routes handled by the Ember admin app. React delegates these to Ember via
-// EmberFallback. When migrating a route to React, remove its entry from here.
-const EMBER_ROUTES: string[] = ['/pro/*'];
-
-const emberFallbackHandle = { allowInForceUpgrade: true } satisfies AdminRouteHandle;
-
-const emberFallbackRoutes: RouteObject[] = EMBER_ROUTES.map((path) => ({
-  path,
-  Component: EmberFallback,
-  handle: emberFallbackHandle,
-}));
+import { authRoutes } from './auth/api';
 
 const appRoutes: RouteObject[] = [
   {
@@ -90,11 +81,36 @@ const appRoutes: RouteObject[] = [
     lazy: lazyComponent(lazyAutomationsScreen),
   },
   {
+    path: '/apps',
+    handle: { requiresAccess: canManageApps } satisfies AccessRouteHandle,
+    lazy: lazyComponent(lazyAppsScreen),
+  },
+  {
+    // The install link: `#/apps/install?manifest=<url>` opens the install flow.
+    // Open to all staff, so those who can't install are told who can, not redirected.
+    path: '/apps/install',
+    lazy: lazyComponent(lazyAppInstallScreen),
+  },
+  {
+    // `/apps/:id` is the app's own page, so details live under `/apps/details/`.
+    path: '/apps/details/:installationId',
+    handle: { requiresAccess: canManageApps } satisfies AccessRouteHandle,
+    lazy: lazyComponent(lazyAppDetailsScreen),
+  },
+  {
+    // An installed app's page, in a sandboxed frame. `*` is the app's own route, e.g.
+    // /apps/<id>/week, which the bridge passes to the app along with the query.
+    path: '/apps/:installationId/*',
+    handle: { requiresAccess: canManageApps } satisfies AccessRouteHandle,
+    lazy: lazyComponent(lazyAppPageScreen),
+  },
+  {
     // The automation editor hides the admin sidebar for a focused,
     // full-screen editing surface.
     path: '/automations/:id',
     handle: {
       hideAdminSidebar: true,
+      screenTransition: true,
       requiresAccess: canManageAutomations,
     } satisfies AdminRouteHandle & AccessRouteHandle,
     lazy: lazyComponent(lazyAutomationEditorScreen),
@@ -164,34 +180,25 @@ const appRoutes: RouteObject[] = [
     children: activityPubRoutes,
   },
   {
-    // hideAdminSidebar lives on the handle, not the lazy module, so the shell
-    // hides at first paint instead of waiting on the settings chunk.
+    // The shell swaps its primary navigation for Settings on desktop before
+    // the lazy settings chunk has resolved. Mobile keeps its full takeover.
     path: `settings`,
-    lazy: lazyComponent(lazySettingsScreen),
+    Component: SettingsRoute,
     children: settingsRouteChildren,
     handle: {
       allowInForceUpgrade: true,
-      hideAdminSidebar: true,
+      screenTransition: true,
+      settingsSidebar: true,
       requiresAccess: canAccessSettingsRoute,
     } satisfies AdminRouteHandle & AccessRouteHandle,
   },
   { path: '/posts', lazy: lazyComponent(lazyPostsListRoute) },
   { path: '/pages', lazy: lazyComponent(lazyPagesListRoute) },
   {
-    // Served by React or Ember depending on the `editorReact` Labs flag.
-    //
-    // The editor is a focused writing surface and has always hidden the nav
-    // sidebar. Ember arranges that by setting `ui.isFullScreen` when the
-    // editor route *activates* — but the Ember posts route aborts its
-    // transition to hand off to React, so the editor route never deactivates,
-    // and a second visit is a model change on an already-active route where
-    // `activate()` does not run again. The sidebar came back from the second
-    // post onwards. Deciding it from the route handle makes React the
-    // authority, removes the cross-implementation handshake, and applies to
-    // both sides of the `editorReact` flag.
+    // The editor is a focused writing surface and hides the nav sidebar.
     path: '/editor/*',
-    Component: EditorGate,
-    handle: { ...emberFallbackHandle, hideAdminSidebar: true } satisfies AdminRouteHandle,
+    lazy: lazyComponent(lazyEditorScreen),
+    handle: { hideAdminSidebar: true, screenTransition: true } satisfies AdminRouteHandle,
   },
   { path: '/site', lazy: lazyComponent(lazyViewSiteScreen) },
   { path: '/restore', lazy: lazyComponent(lazyRestoreScreen) },
@@ -203,10 +210,16 @@ const appRoutes: RouteObject[] = [
       requiresAccess: hasAdminAccess,
     } satisfies AdminRouteHandle & AccessRouteHandle,
   },
-  // Ember-handled routes
-  ...emberFallbackRoutes,
   {
-    // 404 catch-all for routes not handled by React or Ember
+    // The billing app itself stays mounted across routes (see BillingFrame),
+    // so this route only decides access. Reachable in force upgrade: it is
+    // the way out of it.
+    path: '/pro/*',
+    Component: BillingRoute,
+    handle: { allowInForceUpgrade: true } satisfies AdminRouteHandle,
+  },
+  {
+    // 404 catch-all
     path: '*',
     Component: NotFound,
   },
@@ -230,43 +243,30 @@ export const routes: RouteObject[] = [
   },
 ];
 
-// Ember's router only learns about a URL change from `hashchange`, which the
-// React router's pushState navigation does not fire, so links into Ember-owned
-// routes must stay native hash anchors. Everything else can be a router link
-// (and so gets router history state, which the unsaved-changes blockers need).
-const EMBER_ROUTE_COMPONENTS = new Set<unknown>([EmberFallback]);
+// matchRoutes flattens and ranks the whole tree on every call, and every link
+// asks (AdminLink, the screen-transition check), so a screen full of links
+// re-matched the tree many times per render. The tree is static, so a path's
+// matches never change; the cap only bounds paths carrying ids or slugs.
+const MATCH_CACHE_LIMIT = 500;
+const matchCache = new Map<string, ReturnType<typeof matchRoutes<RouteObject>>>();
 
-/** Decides for any path whether Ember owns it, for destinations only known at event time. */
-export function useEmberOwnedRouteMatcher(): (pathname: string) => boolean {
-  const editorOwner = useFlagGatedRouteOwner('editorReact');
-  const authScreensOwner = useAuthScreensOwner();
-
-  return useCallback(
-    (pathname: string) => {
-      const leaf = matchRoutes(routes, pathname)?.at(-1)?.route;
-      if (!leaf) {
-        return true;
-      }
-      if (leaf.Component === EditorGate) {
-        return editorOwner !== 'react';
-      }
-      if ((leaf.handle as AuthRouteHandle | undefined)?.authScreen) {
-        return authScreensOwner !== 'react';
-      }
-      return EMBER_ROUTE_COMPONENTS.has(leaf.Component);
-    },
-    [editorOwner, authScreensOwner],
-  );
-}
-
-export function useIsEmberOwnedRoute(pathname: string): boolean {
-  return useEmberOwnedRouteMatcher()(pathname);
+/** `matchRoutes(routes, pathname)`, memoized per path. Callers must not mutate the result. */
+export function matchAdminRoutes(pathname: string): ReturnType<typeof matchRoutes<RouteObject>> {
+  let matches = matchCache.get(pathname);
+  if (matches === undefined) {
+    if (matchCache.size >= MATCH_CACHE_LIMIT) {
+      matchCache.clear();
+    }
+    matches = matchRoutes(routes, pathname);
+    matchCache.set(pathname, matches);
+  }
+  return matches;
 }
 
 /** The matched route's path pattern, e.g. `/tags/:tagSlug`, never the path's own ids or slugs. */
 function matchedRoutePattern(pathname: string): string {
   let pattern = '';
-  for (const { route } of matchRoutes(routes, pathname) ?? []) {
+  for (const { route } of matchAdminRoutes(pathname) ?? []) {
     if (route.path) {
       // An absolute child path already repeats its parents' paths
       pattern = route.path.startsWith('/') ? route.path : `${pattern}/${route.path}`;
@@ -275,11 +275,8 @@ function matchedRoutePattern(pathname: string): string {
   return pattern.replace(/\/\/+/g, '/') || '/';
 }
 
-/** Tells Ember which route pattern React is showing, or null while Ember serves the screen. */
-export function useSyncEmberRoutePattern(): void {
+/** The route pattern showing. */
+export function useRoutePattern(): string {
   const { pathname } = useLocation();
-  const isEmberOwned = useIsEmberOwnedRoute(pathname);
-  const routePattern = isEmberOwned ? null : matchedRoutePattern(pathname);
-
-  useEffect(() => syncEmberRoutePattern(routePattern), [routePattern]);
+  return matchedRoutePattern(pathname);
 }

@@ -29,7 +29,6 @@ import { PageHeader } from '@tryghost/shade/patterns';
 import { cn, LucideIcon } from '@tryghost/shade/utils';
 import { toast } from 'sonner';
 import { useBrowseNewsletters } from '@tryghost/admin-x-framework/api/newsletters';
-import { useHandleError } from '@tryghost/admin-x-framework/hooks';
 import { useBrowseTiers } from '@tryghost/admin-x-framework/api/tiers';
 import { useCurrentUser } from '@tryghost/admin-x-framework/api/current-user';
 import {
@@ -39,11 +38,14 @@ import {
   isOwnerUser,
 } from '@tryghost/admin-x-framework/api/users';
 
-import { NEWSLETTERS_SEARCH_PARAMS, PAID_TIERS_SEARCH_PARAMS } from '@/editor/browse-params';
+import { PAID_TIERS_SEARCH_PARAMS, newslettersSearchParams } from '@/editor/browse-params';
 import { EDITOR_REQUEST_OPTIONS } from '@/editor/request-options';
 import { postPreviewModal, postPreviewSaveFailed } from '@tryghost/test-data/selectors/editor';
 import { useEditorSettings } from '@/editor/use-editor-settings';
 import { FullscreenDialog } from '@/editor/fullscreen-dialog';
+import { describeRejectedAction } from '@/editor/publish/completion-message';
+import { EMAIL_SUBJECT_MAX, overLength } from '@/editor/session/settings-fields';
+import type { PublishFlowPost } from '@/editor/publish/flow-post';
 import { BrowserPreview } from './browser-preview';
 import { EmailPreview } from './email-preview';
 import { EmailSubject, type EmailSubjectEditor } from './email-subject';
@@ -72,15 +74,26 @@ export interface PostPreviewModalProps {
   previewUrl: string;
   /** Pages have no email preview. */
   isPost?: boolean;
+  /** The saved post, whose email is checked against the size inboxes clip at. */
+  post?: PublishFlowPost;
   /** The post's own newsletter, preselected in the email preview. */
   newsletterSlug?: string;
-  /** Awaited before the preview renders, so the caller can save the draft first. */
+  /** Preselected when the post has no newsletter of its own, such as the publish flow's pick. */
+  fallbackNewsletterSlug?: string;
+  /** Hears a newsletter the writer picks in the email preview. */
+  onNewsletterPick?: (slug: string) => void;
+  /**
+   * Awaited before the preview renders, so the caller can save the draft first.
+   * A rejection's message is shown to the writer as the reason it could not.
+   */
   onBeforeOpen?: () => Promise<void>;
   /** Renders a Publish button; supplied for users who can publish. */
   onPublish?: () => void;
   /** Keeps the Publish button disabled while the caller cannot open its publish flow. */
   publishDisabled?: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Called as the closed preview hands focus back; preventing it keeps focus where the caller puts it. */
+  onCloseAutoFocus?: (event: Event) => void;
 }
 
 export function PostPreviewModal({
@@ -90,11 +103,15 @@ export function PostPreviewModal({
   postId,
   previewUrl,
   isPost = true,
+  post,
   newsletterSlug,
+  fallbackNewsletterSlug,
+  onNewsletterPick,
   onBeforeOpen,
   onPublish,
   publishDisabled = false,
   onOpenChange,
+  onCloseAutoFocus,
 }: PostPreviewModalProps) {
   const [format, setFormat] = useState<PreviewFormat>('browser');
   const [device, setDevice] = useState<PreviewDevice>('desktop');
@@ -104,9 +121,9 @@ export function PostPreviewModal({
   const [prepareState, setPrepareState] = useState<PrepareState>(() =>
     onBeforeOpen && open ? 'preparing' : 'ready',
   );
+  const [prepareFailure, setPrepareFailure] = useState('');
   const [wasOpen, setWasOpen] = useState(open);
 
-  const handleError = useHandleError();
   const { data: currentUser } = useCurrentUser({ requestOptions: EDITOR_REQUEST_OPTIONS });
   const { data: settingsData } = useEditorSettings();
   const paidMembersEnabled = usePaidMembersEnabled({ requestOptions: EDITOR_REQUEST_OPTIONS });
@@ -142,7 +159,7 @@ export function PostPreviewModal({
     isFetchingNextPage: isFetchingNextNewsletterPage,
     refetch: refetchActiveNewsletters,
   } = useBrowseNewsletters({
-    searchParams: NEWSLETTERS_SEARCH_PARAMS,
+    searchParams: newslettersSearchParams(currentUser),
     enabled: open && prepareState === 'ready' && emailAvailable,
     requestOptions: EDITOR_REQUEST_OPTIONS,
   });
@@ -216,6 +233,18 @@ export function PostPreviewModal({
     setWasOpen(open);
     preparePromise.current = null;
     setPrepareState(open && onBeforeOpen ? 'preparing' : 'ready');
+    // Each opening starts from the post's or the publish flow's newsletter, not an earlier pick.
+    if (open) {
+      setPickedNewsletterSlug(null);
+      // An over-long subject opens the preview in place of a refused action, on
+      // the tab that edits it.
+      if (emailAvailable && subjectEditor && overLength(subjectEditor.value, EMAIL_SUBJECT_MAX)) {
+        setFormat('email');
+        if (segment === 'anonymous') {
+          setSegment('free');
+        }
+      }
+    }
   }
 
   useEffect(() => {
@@ -240,7 +269,7 @@ export function PostPreviewModal({
       },
       (error: unknown) => {
         if (!cancelled) {
-          handleError(error);
+          setPrepareFailure(describeRejectedAction(error).message);
           setPrepareState('failed');
         }
       },
@@ -249,7 +278,7 @@ export function PostPreviewModal({
     return () => {
       cancelled = true;
     };
-  }, [handleError, open, prepareState]);
+  }, [open, prepareState]);
 
   const segmentOptions = useMemo<SegmentOption[]>(() => {
     const options: SegmentOption[] =
@@ -279,7 +308,13 @@ export function PostPreviewModal({
 
   // The post's own newsletter wins even when it is no longer on the active
   // list, because that is the newsletter its email would be rendered for.
-  const selectedNewsletterSlug = pickedNewsletterSlug ?? newsletterSlug ?? newsletters[0]?.slug;
+  const selectedNewsletterSlug =
+    pickedNewsletterSlug ?? newsletterSlug ?? fallbackNewsletterSlug ?? newsletters[0]?.slug;
+
+  const retryPreparation = () => {
+    preparePromise.current = null;
+    setPrepareState('preparing');
+  };
 
   const retryNewsletterLookup = () => {
     if (activeNewslettersError) {
@@ -297,12 +332,28 @@ export function PostPreviewModal({
   const showTierSelect = segment === 'tier' && tiers.length > 0;
   const showEmail = format === 'email' && emailAvailable;
 
+  const pickNewsletter = (slug: string) => {
+    setPickedNewsletterSlug(slug);
+    onNewsletterPick?.(slug);
+  };
+
   const changeFormat = (next: PreviewFormat) => {
     setFormat(next);
 
     if (next === 'email' && segment === 'anonymous') {
       setSegment('free');
     }
+  };
+
+  // The subject is edited here, so a Publish its length would refuse shows the field
+  // and its rule rather than leaving the preview; the caller refuses the publish.
+  const subjectInvalid =
+    emailAvailable && !!subjectEditor && overLength(subjectEditor.value, EMAIL_SUBJECT_MAX);
+  const publish = () => {
+    if (subjectInvalid) {
+      changeFormat('email');
+    }
+    onPublish?.();
   };
 
   const copyPreviewLink = async () => {
@@ -344,7 +395,7 @@ export function PostPreviewModal({
             Close
           </Button>
           {onPublish ? (
-            <Button className="w-20 shrink-0" disabled={publishDisabled} onClick={onPublish}>
+            <Button className="w-20 shrink-0" disabled={publishDisabled} onClick={publish}>
               Publish
             </Button>
           ) : null}
@@ -447,6 +498,7 @@ export function PostPreviewModal({
       layout="header"
       open={open}
       title="Preview"
+      onCloseAutoFocus={onCloseAutoFocus}
       onOpenChange={onOpenChange}
     >
       <Inline
@@ -477,33 +529,20 @@ export function PostPreviewModal({
                 {emailAvailable && subjectEditor && (
                   <Stack className="text-left" gap="xs">
                     <span className="text-sm text-muted-foreground">Email subject</span>
+                    {/* Retrying the preview's own save carries the subject; the body says why it failed. */}
                     <EmailSubject
-                      editor={{
-                        ...subjectEditor,
-                        onSave: async () => {
-                          await subjectEditor.onSave();
-                          preparePromise.current = null;
-                          setPrepareState('preparing');
-                        },
-                      }}
+                      editor={{ ...subjectEditor, saveError: null, onCommit: retryPreparation }}
                     />
                   </Stack>
                 )}
-                <Button
-                  className="self-center"
-                  variant="outline"
-                  onClick={() => {
-                    preparePromise.current = null;
-                    setPrepareState('preparing');
-                  }}
-                >
+                <Button className="self-center" variant="outline" onClick={retryPreparation}>
                   Retry
                 </Button>
               </Stack>
             }
             className="grow justify-center self-center"
             data-testid={postPreviewSaveFailed}
-            description="Saving the post failed, so there is nothing new to preview."
+            description={<span role="alert">{prepareFailure}</span>}
             title="Couldn’t preview this post"
           >
             <LucideIcon.TriangleAlert />
@@ -518,14 +557,20 @@ export function PostPreviewModal({
             newsletterMissing={postNewsletterDeleted && selectedNewsletterSlug === newsletterSlug}
             newsletters={newsletters}
             newsletterSlug={selectedNewsletterSlug}
+            post={post}
             postId={postId}
             subjectEditor={subjectEditor}
             tierName={selectedTier?.name}
-            onNewsletterChange={setPickedNewsletterSlug}
+            onNewsletterChange={pickNewsletter}
             onRetryNewsletterLookup={retryNewsletterLookup}
           />
         ) : (
-          <BrowserPreview audience={audience} device={device} previewUrl={previewUrl} />
+          <BrowserPreview
+            audience={audience}
+            device={device}
+            previewUrl={previewUrl}
+            onEscape={() => onOpenChange(false)}
+          />
         )}
       </Inline>
     </FullscreenDialog>

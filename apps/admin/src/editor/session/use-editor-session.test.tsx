@@ -1,11 +1,15 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, renderHook, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ReactNode } from 'react';
+import { buildPostEditorReadParams } from '@tryghost/admin-x-framework/api/post-contract';
+import { postsDataType } from '@tryghost/admin-x-framework/api/posts';
+import { apiUrl } from '@tryghost/admin-x-framework/helpers';
 import { dispatchedIntents } from './__test-utils__/save-engine-spy';
 import { record } from './__test-utils__/session-harness';
 import { reportLeaveConfirmation, reportSaveFailure } from '@/editor/report-error';
 import type { SaveCompletion } from '@/editor/engine/save-engine';
+import { searchIndexQueryKey } from '@/shared/search-index';
 import { deferred } from '@/utils/deferred';
 import type { EditorRecord } from './projection';
 import { useEditorSession } from './use-editor-session';
@@ -49,12 +53,9 @@ beforeEach(() => {
   offeredReads.length = 0;
 });
 
-vi.mock('@tryghost/admin-x-framework', () => ({
-  useLocation: () => ({ key: 'editor', state: null }),
-}));
-
 vi.mock('@/editor/report-error', () => ({
   reportEditorError: vi.fn(),
+  reportEditorNotice: vi.fn(),
   reportLeaveConfirmation: vi.fn(),
   reportSaveFailure: vi.fn(),
 }));
@@ -264,6 +265,7 @@ describe('useEditorSession refetched record', () => {
 
     expect(result.current.loadedRecord).toBe(loaded);
     expect(result.current.isDirty()).toBe(false);
+    expect(result.current.newerVersionAvailable).toBe(true);
   });
 
   it('describes a read of its own save once that save has landed', async () => {
@@ -284,6 +286,7 @@ describe('useEditorSession refetched record', () => {
     postApi.read = { posts: [ownSave] };
     rerender();
     expect(result.current.loadedRecord).toBe(loaded);
+    expect(result.current.newerVersionAvailable).toBe(false);
 
     await act(async () => {
       answer.resolve({ posts: [ownSave] });
@@ -292,5 +295,215 @@ describe('useEditorSession refetched record', () => {
 
     expect(result.current.loadedRecord).toBe(ownSave);
     expect(result.current.isDirty()).toBe(false);
+    expect(result.current.newerVersionAvailable).toBe(false);
+  });
+});
+
+describe('useEditorSession saved record', () => {
+  const screenRead = [postsDataType, apiUrl('/posts/abc123/', buildPostEditorReadParams())];
+
+  beforeEach(() => queryClient.clear());
+
+  it('writes the record a save was answered with into the screen’s read', async () => {
+    const answered = record({ title: 'A new title', updated_at: '2026-01-01T00:00:01.000Z' });
+    postApi.edit.mockResolvedValue({ posts: [answered] });
+    const { result } = setup();
+
+    act(() => result.current.bind.onTitleChange('A new title'));
+    await act(() => result.current.saveExplicit());
+
+    expect(queryClient.getQueryData(screenRead)).toEqual({ posts: [answered] });
+  });
+
+  it('keeps a later version a read put there before the save’s answer landed', async () => {
+    const answer = deferred<{ posts: EditorRecord[] }>();
+    postApi.edit.mockReturnValueOnce(answer.promise);
+    const { result } = setup();
+
+    act(() => result.current.bind.onTitleChange('A new title'));
+    let saving!: Promise<SaveCompletion>;
+    act(() => {
+      saving = result.current.saveExplicit();
+    });
+    await waitFor(() => expect(postApi.edit).toHaveBeenCalledTimes(1));
+
+    // Another writer saved after this one, and a read of theirs landed first.
+    const theirs = {
+      posts: [record({ title: 'Their title', updated_at: '2026-01-01T00:00:02.000Z' })],
+    };
+    queryClient.setQueryData(screenRead, theirs);
+    await act(async () => {
+      answer.resolve({
+        posts: [record({ title: 'A new title', updated_at: '2026-01-01T00:00:01.000Z' })],
+      });
+      await saving;
+    });
+
+    expect(queryClient.getQueryData(screenRead)).toBe(theirs);
+  });
+});
+
+describe('useEditorSession reload', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('refuses a newer version when the writer edits while the reload waits', async () => {
+    const newer = record({ title: 'Their title', updated_at: '2026-01-02T00:00:00.000Z' });
+    stable.fetchApi.mockResolvedValueOnce({ posts: [newer] });
+    const cancelled = deferred<void>();
+    const cancelQueries = vi
+      .spyOn(queryClient, 'cancelQueries')
+      .mockReturnValueOnce(cancelled.promise);
+    const { result } = setup();
+    const loaded = result.current.loadedRecord;
+
+    let reloading!: Promise<string>;
+    act(() => {
+      reloading = result.current.reload();
+    });
+    await waitFor(() => expect(cancelQueries).toHaveBeenCalledTimes(1));
+    act(() => result.current.bind.onTitleChange('Typed while reloading'));
+
+    let outcome = '';
+    await act(async () => {
+      cancelled.resolve();
+      outcome = await reloading;
+    });
+
+    expect(outcome).toBe('failed');
+    expect(result.current.loadedRecord).toBe(loaded);
+    expect(result.current.bind.title).toBe('Typed while reloading');
+  });
+
+  it('leaves the screen’s read alone when the writer left before the reload’s read came back', async () => {
+    const newer = record({ title: 'Their title', updated_at: '2026-01-02T00:00:00.000Z' });
+    const read = deferred<{ posts: EditorRecord[] }>();
+    stable.fetchApi.mockReturnValueOnce(read.promise);
+    const cancelQueries = vi.spyOn(queryClient, 'cancelQueries');
+    const setQueryData = vi.spyOn(queryClient, 'setQueryData');
+    const { result, unmount } = setup();
+
+    let reloading!: Promise<string>;
+    act(() => {
+      reloading = result.current.reload();
+    });
+    unmount();
+    // Disposal follows the unmount by a tick.
+    await new Promise((resolve) => {
+      setTimeout(resolve);
+    });
+    read.resolve({ posts: [newer] });
+
+    expect(await reloading).toBe('abandoned');
+    expect(cancelQueries).not.toHaveBeenCalled();
+    expect(setQueryData).not.toHaveBeenCalled();
+  });
+
+  type Read = ReturnType<typeof deferred<{ posts: EditorRecord[] }>>;
+  it.each([
+    ['fails', (read: Read) => read.reject(new Error('offline'))],
+    ['finds no post', (read: Read) => read.resolve({ posts: [] })],
+  ])('reports nothing when the reload’s read %s after the writer left', async (_, settle) => {
+    const read = deferred<{ posts: EditorRecord[] }>();
+    stable.fetchApi.mockReturnValueOnce(read.promise);
+    const { result, unmount } = setup();
+
+    let reloading!: Promise<string>;
+    act(() => {
+      reloading = result.current.reload();
+    });
+    unmount();
+    // Disposal follows the unmount by a tick.
+    await new Promise((resolve) => {
+      setTimeout(resolve);
+    });
+    settle(read);
+
+    expect(await reloading).toBe('abandoned');
+  });
+});
+
+describe('useEditorSession search index', () => {
+  const postsList = searchIndexQueryKey('posts');
+
+  beforeEach(() => queryClient.clear());
+
+  it('writes a save that lands after the writer left into the posts list', async () => {
+    const loaded = record();
+    queryClient.setQueryData(postsList, {
+      posts: [{ id: loaded.id, title: loaded.title, slug: loaded.slug }],
+    });
+    const answer = deferred<{ posts: EditorRecord[] }>();
+    postApi.edit.mockReturnValueOnce(answer.promise);
+    const { result, unmount } = setup(loaded);
+
+    act(() => result.current.bind.onTitleChange('Saved after leaving'));
+    let saving!: Promise<SaveCompletion>;
+    act(() => {
+      saving = result.current.saveExplicit();
+    });
+    await waitFor(() => expect(postApi.edit).toHaveBeenCalledTimes(1));
+    unmount();
+    // Disposal follows the unmount by a tick, so the answer reaches a disposed session.
+    await new Promise((resolve) => {
+      setTimeout(resolve);
+    });
+    answer.resolve({
+      posts: [record({ title: 'Saved after leaving', updated_at: '2026-01-01T00:00:01.000Z' })],
+    });
+    await saving;
+
+    expect(queryClient.getQueryData(postsList)).toMatchObject({
+      posts: [{ id: loaded.id, title: 'Saved after leaving' }],
+    });
+  });
+});
+
+describe('useEditorSession sign-in asked for outside a save', () => {
+  it('opens the sign-in dialog and answers every request once the writer signs in', async () => {
+    const { result } = setup();
+    expect(result.current.reauthOpen).toBe(false);
+
+    let first: Promise<boolean> = Promise.resolve(false);
+    let second: Promise<boolean> = Promise.resolve(false);
+    act(() => {
+      first = result.current.requestReauth();
+      second = result.current.requestReauth();
+    });
+    expect(result.current.reauthOpen).toBe(true);
+
+    act(() => result.current.reauthSucceeded());
+
+    await expect(first).resolves.toBe(true);
+    await expect(second).resolves.toBe(true);
+    expect(result.current.reauthOpen).toBe(false);
+    expect(result.current.state.kind).toBe('idle');
+  });
+
+  it('answers false when the writer abandons it, leaving the engine alone', async () => {
+    const { result } = setup();
+
+    let request: Promise<boolean> = Promise.resolve(true);
+    act(() => {
+      request = result.current.requestReauth();
+    });
+    act(() => result.current.reauthAbandoned());
+
+    await expect(request).resolves.toBe(false);
+    expect(result.current.reauthOpen).toBe(false);
+    expect(result.current.state.kind).toBe('idle');
+  });
+
+  it('answers false when the editor goes while it waits', async () => {
+    const { result, unmount } = setup();
+
+    let request: Promise<boolean> = Promise.resolve(true);
+    act(() => {
+      request = result.current.requestReauth();
+    });
+    unmount();
+
+    await expect(request).resolves.toBe(false);
   });
 });

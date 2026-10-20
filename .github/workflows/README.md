@@ -53,7 +53,7 @@ How we write GitHub Actions workflows safely. Follow these when adding or editin
 - **Pin every third-party action to a full commit SHA**, with the version as a trailing comment:
 
   ```yaml
-  uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+  uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
   ```
 
   A tag or branch ref can be re-pointed at malicious code; a SHA cannot.
@@ -97,3 +97,20 @@ their images are not published to GHCR.
 Ghost-Moya re-reads the PR's state, labels and head before changing anything, so a
 delayed or superseded request deploys the current head or nothing at all. GitHub
 deployments record the commit that was actually deployed.
+
+## Documentation changes
+
+CI treats `ghost/core/server/services/service-inventory.yaml` as documentation
+for runtime checks. Inventory edits still run the required **Validate service
+inventory** job, which runs the existing metadata tests without Ghost runtime
+setup or workspace builds. The same job runs when its test or configuration changes.
+
+Changes confined to inventory and documentation skip the full code and E2E jobs.
+Validator changes still run code checks, and mixed runtime changes retain their
+normal checks.
+
+Run the focused validation locally with:
+
+```sh
+pnpm --filter ghost exec vitest run --config vitest.config.inventory.ts
+```

@@ -123,6 +123,29 @@ describe('Posts list data', () => {
     });
   });
 
+  it('runs only the buckets the selected types need', async () => {
+    const postsApi = fakePosts((query) => byBucket(query.filter));
+    await renderAdminApp('/posts?type=draft,published');
+
+    await expect.element(postsListScreen.listItems().nth(1)).toBeVisible();
+
+    expect(postsApi.requests.map((request) => request.filter)).toEqual([
+      'status:draft',
+      'status:published',
+    ]);
+  });
+
+  it('ANDs featured with the selected types', async () => {
+    const postsApi = fakePosts((query) => byBucket(query.filter));
+    await renderAdminApp('/posts?type=published,sent&featured=true');
+
+    await expect.element(postsListScreen.listItems().first()).toBeVisible();
+
+    expect(postsApi.requests.map((request) => request.filter)).toEqual([
+      'status:[published,sent]+featured:true',
+    ]);
+  });
+
   it('lets an explicit sort override every bucket', async () => {
     const postsApi = fakePosts((query) => byBucket(query.filter));
     await renderAdminApp('/posts?order=published_at%20asc');
@@ -135,7 +158,7 @@ describe('Posts list data', () => {
   });
 
   // A posts URL is a saved view's identity; rewriting it would corrupt the
-  // view and desync from the Ember screen, which reads the same params.
+  // view.
   it('leaves the URL exactly as it was given', async () => {
     fakePosts((query) => byBucket(query.filter));
     await renderAdminApp('/posts?type=draft&tag=news&order=updated_at+desc');

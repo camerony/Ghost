@@ -1,14 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useLayoutEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
+import { useCurrentUser } from '@tryghost/admin-x-framework/api/current-user';
 import { membersCountString, useMembersCount } from '@tryghost/admin-x-framework/api/members';
 import { useBrowseNewsletters } from '@tryghost/admin-x-framework/api/newsletters';
 import { getNewsletterRecipientFilter } from '@tryghost/admin-x-framework/utils/recipient-filter';
-import { NEWSLETTERS_SEARCH_PARAMS } from './browse-params';
+import { newslettersSearchParams } from './browse-params';
 import { scheduledRecipientAudience } from './post-status';
 import { postPreviewUrl } from './preview/preview-url';
 import { EDITOR_REQUEST_OPTIONS } from './request-options';
 import { describeRevertToast, describeSaveToast, type SaveToast } from './save-toast';
 import { useSiteTimezone } from './use-editor-settings';
+import { useSmallScreen } from './use-small-screen';
 import type { SaveCompletion } from './engine/save-engine';
 import type { EditorSaveResult } from './session/editor-session';
 import type { EditorRecord } from './session/projection';
@@ -41,11 +43,14 @@ function savedRecordOf(completion: SaveCompletion): EditorRecord | undefined {
   return (completion.result as EditorSaveResult).post;
 }
 
-function showSaveToast({ title, description, action }: SaveToast): string {
+function showSaveToast({ title, description, action }: SaveToast, smallScreen: boolean): string {
   saveToastSeq += 1;
   const id = `editor-save-${saveToastSeq}`;
   toast.success(title, {
     id,
+    // Leave both the header and the mobile footer's actions reachable.
+    position: smallScreen ? 'top-left' : 'bottom-left',
+    className: smallScreen ? 'top-20!' : undefined,
     description: description ? (
       <>
         {description.map(({ text, strong }) =>
@@ -78,22 +83,25 @@ interface SaveFeedbackSources {
  * toast and, once the server acknowledges it, describes the post's new state.
  */
 export function useSaveFeedback({ session, displayName, siteUrl }: SaveFeedbackSources) {
+  const smallScreen = useSmallScreen();
   const timezone = useSiteTimezone();
   const audience = scheduledAudienceOf(session.loadedRecord);
   const { count } = useMembersCount(audience?.filter ?? null, {
     requestOptions: EDITOR_REQUEST_OPTIONS,
   });
+  const { data: currentUser } = useCurrentUser({ requestOptions: EDITOR_REQUEST_OPTIONS });
   const { data: newslettersData } = useBrowseNewsletters({
     defaultErrorHandler: false,
     requestOptions: EDITOR_REQUEST_OPTIONS,
-    searchParams: NEWSLETTERS_SEARCH_PARAMS,
-    enabled: audience !== null,
+    searchParams: newslettersSearchParams(currentUser),
+    enabled: audience !== null && currentUser !== undefined,
   });
   const activeNewsletters = (newslettersData?.newsletters ?? []).filter(
     (newsletter) => newsletter.status === 'active',
   ).length;
 
   const sources = {
+    smallScreen,
     session,
     displayName,
     siteUrl,
@@ -110,7 +118,7 @@ export function useSaveFeedback({ session, displayName, siteUrl }: SaveFeedbackS
     if (lastToastId.current) {
       toast.dismiss(lastToastId.current);
     }
-    lastToastId.current = showSaveToast(described);
+    lastToastId.current = showSaveToast(described, latest.current.smallScreen);
   }, []);
 
   const save = useCallback(async (): Promise<SaveCompletion> => {
@@ -167,21 +175,26 @@ export function useSaveFeedback({ session, displayName, siteUrl }: SaveFeedbackS
 
 export type SaveButtonPhase = 'idle' | 'running' | 'success' | 'failure';
 
-/** A save button's own progress, driven by the save its click asked for. */
-export function useSaveButtonPhase(save: () => Promise<SaveCompletion>) {
+/** A save button's progress belongs to the document its click asked to save. */
+export function useSaveButtonPhase(save: () => Promise<SaveCompletion>, contentKey: number) {
   const [phase, setPhase] = useState<SaveButtonPhase>('idle');
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const mounted = useRef(true);
+  const generation = useRef(0);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     mounted.current = true;
+    generation.current += 1;
+    // Reloads and revision restores replace the document without remounting the header.
+    setPhase('idle');
     return () => {
       mounted.current = false;
       clearTimeout(timer.current);
     };
-  }, []);
+  }, [contentKey]);
 
   const run = useCallback(async () => {
+    const startedGeneration = generation.current;
     clearTimeout(timer.current);
     setPhase('running');
 
@@ -189,7 +202,7 @@ export function useSaveButtonPhase(save: () => Promise<SaveCompletion>) {
     try {
       completion = await save();
     } finally {
-      if (mounted.current) {
+      if (mounted.current && generation.current === startedGeneration) {
         if (completion?.kind === 'saved') {
           setPhase('success');
           clearTimeout(timer.current);

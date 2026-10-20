@@ -6,6 +6,15 @@ preview flows it opens, plus the restore screen that turns a local copy of a
 lost draft back into a post. `api.ts` is the domain's public surface — the shell
 mounts both screens lazily through it and everything else here is internal.
 
+Once a signed-in admin is idle, the shell also fetches the editor screen and
+Koenig through `api.ts`, so opening the first post doesn't wait on either
+download.
+
+The editor opens once it has the site's settings, config and site record and
+the current user, which Koenig's cards are configured from. If one of them fails
+to load with no copy cached, the editor shows its load error, and Retry reads it
+again.
+
 ## The modules
 
 | Module                                           | What it is                                                                                                           |
@@ -17,19 +26,25 @@ mounts both screens lazily through it and everything else here is internal.
 | [`preview/`](preview/README.md)                  | The modal that shows a post as the site renders it or as the newsletter it would be sent as                          |
 | `editor-screen.tsx`                              | The route: loads the post, builds the session, and lays out the header, the surface and the sidebar                  |
 | `post-editor.tsx`, `koenig-post-editor.tsx`      | The title, excerpt and feature image around the Koenig instances, and the Koenig integration itself                  |
-| `editor-header-actions.tsx`, `editor-status.tsx` | The header's publish and preview controls, and the line saying where the post stands, with a failed send's retry     |
+| `editor-header-actions.tsx`, `editor-status.tsx` | The header's publish and preview controls, and the line saying where the post stands or why a save failed            |
 | `use-save-feedback.tsx`, `save-toast.ts`         | The toast and button progress that report an explicit save, and the pure copy they show                              |
 | `card-config.ts`, `use-post-card-config.ts`      | What Koenig's cards are told about the site and the post they are being edited in                                    |
 | `local-revisions.ts`                             | Browser-local copies of drafts holding unsaved work: how they are stored, trimmed and read back                      |
+| `email-size.ts`, `use-email-size.ts`             | The estimate of how large a post's newsletter would be, and when the editor makes it                                 |
 | `restore/`                                       | The `/restore` screen: lists this browser's local copies and creates a new draft from any of them                    |
+| `writing-focus.ts`, `use-writing-focus.ts`       | Hides the editor's chrome while the writer types and brings it back on a pointer move or scroll                      |
+| `editor-font.ts`, `use-editor-font.ts`           | The font the writer reads the post in while editing, chosen in the settings panel                                    |
+| `settings-open.ts`, `use-settings-open.ts`       | Whether the settings panel opens with the editor, as the writer last left it                                         |
 
 Two small modules are shared across all of the above. `request-options.ts`
 carries the editor's opt-out from the transport's session-expiry redirect, which
 every request the editor makes passes: leaving the page would take unsaved
-content with it, so the editor surfaces an expired session itself. The opt-out
-belongs to whichever component starts a fetch rather than to the cache entry, so
-a component reading a query key it shares with a screen outside the editor opts
-out too. `layering.ts` carries the z-index a confirmation dialog opened from
+content with it, so the editor surfaces an expired session itself. Until a post
+has opened nothing is unsaved, so a first read refused because the session has
+expired reloads the page instead: the signed-out admin asks the writer to sign
+in and then reopens the post. The opt-out belongs to whichever component starts
+a fetch rather than to the cache entry, so a component reading a query key it
+shares with a screen outside the editor opts out too. `layering.ts` carries the z-index a confirmation dialog opened from
 inside another editor surface needs in order to paint above it.
 
 ## Title and excerpt limits
@@ -51,20 +66,44 @@ then starts at its email-failure step. Whether a post qualifies is decided by
 the flow's own `initialEmailError()`, and the button is offered only to roles
 Core lets retry an email, so an Author sees the failure without it.
 
-Every opener stays unavailable until the publish inputs have loaded. When they
-fail to load, the header shows the error with a Retry for a draft, and for a
-post whose status line offers the retry. After a retry, or a publish that
-emails, a published post's status line reads "Published and sending to N
-members" while the email is on its way and "Published and sent to N members"
-once the flow's email confirmation finds it submitted; an email-only send reads
-"Sent to N members" throughout.
+While the post breaks a rule a save checks, the header's Preview and Publish,
+their shortcuts, the preview's Publish, Unpublish and Unschedule open nothing. The
+rules are the save's own: an over-long title, excerpt, email subject, meta,
+social card or code injection field, an invalid canonical URL, specific-tier
+access with no tier, an empty author list, and a publish date staged for a time
+that has not passed. Each opener is refused as a save the writer asks for is:
+the status line names the rule in red in place of the status, nothing is sent,
+and the writer is taken to the field. The title and the excerpt under it take
+focus; a field in the settings panel opens the panel, and the field's pane when
+it has one, and takes focus there. The email subject is edited in the preview,
+so the preview opens on its email tab, its own save refused beside the subject. The preview's
+Publish refuses an over-long subject in place: the preview stays open and turns
+to its email tab, where the rule is named beside the subject. A refusal of any
+other field from the preview's Publish closes the preview first. Update is refused by its save
+and takes the writer to the field the same way.
+
+Every opener stays unavailable until the publish inputs have loaded, and so
+does the update flow behind Unpublish, Unschedule and a sent post's "Sent" in
+the status line. When they fail to load, the header shows the error with a
+Retry beside Publish, Unpublish or Unschedule, and for a post whose status line
+offers "Sent" or the retry. A read that found the session gone asks for the
+password in the editor's sign-in dialog first and reads again once the writer
+is back; cancelling it leaves the error, a later background read that fails the
+same way does not ask again, and Retry asks again. A published post's status
+line reads "Published and sending to N members" while its email is on its way
+and "Published and sent to N members" once it is submitted; an email-only send
+reads "Sent to N members" throughout. Neither a publish that emails nor a retry
+waits for the send, so the status line shows it as the save or retry left it.
 
 After successful completion, the editor follows the publish flow's celebration
 handoff to the destination screen. Pages return to `/pages`; scheduled posts
 and posts without email return to `/posts`. Immediately published posts with
 email, including email-only sends and posts that were emailed previously, open
-`/posts/analytics/:id`. Failed saves and failed sends keep the flow open so the
-writer can retry.
+`/posts/analytics/:id`. Failed saves and rejected retries keep the flow open
+so the writer can try again. A publish that emails, or a retry of a failed
+send, opens analytics once Core accepts it, but no sooner than 1.5 seconds
+after the writer confirms; the send's progress, and any failure after that, is
+reported there rather than in the flow.
 
 ## Leaving the editor
 
@@ -78,6 +117,9 @@ state, and the editor accepts only a path under `/posts/analytics/` or
 entry, but a new post never gets it. While the link leads to analytics, the
 status line is hidden unless the post's newsletter failed to send or a save
 failed.
+
+The link shows its arrow alone at every width, as a square button with no
+tooltip, and "Posts", "Pages" or "Analytics" stays its accessible name.
 
 ## Images
 
@@ -135,6 +177,95 @@ a half seconds once it lands and "Retry" after a failure; a contributor's Save r
 a draft from the update flow shows "Post reverted to a draft." ("Page" for a
 page).
 
+A post that has never been saved has no status line. The save that creates it
+reads "Saving…" there, and a first save that fails says why.
+
+## Save problems
+
+The status line is where a failed or refused save is reported: its reason, in
+red, replaces the status until a later save lands, and stays shown when the
+header otherwise hides the status line. A host limit's reason links its "please
+upgrade" phrase to the host's upgrade screen. Retry beside the reason repeats a
+failed save. There is none for a save the editor refused before sending, since
+only fixing the field ends it, nor for a failed publish, schedule or unpublish:
+a retry there would save the post without changing its status, so the publish
+or update flow is where those are retried. While a collision blocks the next
+save, its banner offers the ways out instead.
+
+What the status line cannot hold has a banner above the header, which moves
+down with the settings toggle beneath it: a collision, a deleted post, lost
+access and a crashed editor, each with Reload or Copy content, and a newer
+version saved elsewhere. Changes held back by a field's rule have no banner;
+the field names its rule, and the status line does once a save the writer asks
+for is refused over it.
+
+The header row's actions line up with the settings toggle. A status that wraps
+keeps its first line level with the back link and grows downward.
+
+Below Tailwind's `sm` breakpoint the status stays on the header row beside the
+back link, and the header's actions move to the bottom bar: the word count sits
+in the bottom-left corner and the actions in the bottom right. The bar's
+rightmost action, Publish, Update or Save, is a primary button there, and the
+bar names no shortcuts, which still work. `editor-header-actions.tsx` builds one
+list of controls and, below the breakpoint, portals them into a slot
+`post-editor.tsx` keeps in its footer, so the header and the bar share order,
+disabled states, refusals and flows. Only the controls move; the flows they open
+stay mounted, so crossing the breakpoint keeps an open flow. A failed publish
+inputs load shows its message and Retry there too. While the on-screen keyboard
+is open the bar's actions are hidden with the word count.
+
+## Editor font
+
+The settings panel's Editor font row offers a choice of three fonts to read the
+post in while editing (see the [settings
+README](settings/README.md#editor-font)): the editor's own serif (Georgia), sans
+(Inter) and mono (the system's monospace font: SF Mono on Apple devices,
+Consolas on Windows). Only the editor changes; the theme, the preview and the
+email never do.
+
+A choice applies at once, so the writer can compare, and is saved as it is
+made, as `editor.bodyFont` in the user's preferences, so it follows the writer
+between browsers. Saves run one after another, so the last choice is the one
+that holds, and the editor closing sends any choice still unsaved. A failed save
+keeps the choice for the visit and says so. A writer who never chose reads
+serif.
+
+The editor lets Inter choose its optical size wherever
+it sets text in Inter: the title, the excerpt and headings always, and the body
+in sans. Admin pins Inter to its text design. In the editor, Inter follows the
+font size instead, from its text design at 14px to its finer display one at
+32px: the body and excerpt sit near the text design, and the title and larger
+headings take the display one (`editor-optical-sizing` in `index.css`).
+
+The font is set on the editor as `data-editor-font`. `index.css` maps each value
+to Koenig's content font variables (see the koenig-lexical README) and to the
+title and excerpt's own `--editor-display-*` ones. Sans sets the body in Inter
+and keeps the headings, title and excerpt as they are. Mono sets everything the
+writer writes in the monospace font: the title, the excerpt, the body, headings and the
+text of callout, toggle, header, product and call-to-action cards. Captions, alt
+text, buttons, bookmark previews and every control stay in Inter. Each font
+carries its own sizes, line height and tracking, since the three set very
+differently at the same size.
+
+## Link suggestions
+
+The link toolbar loads content search indexes on first use and shares them with
+global search in the React Query cache. Staff edits update the saved name, slug
+and URL in both searches; deletion removes the staff entry. Preference-only
+saves reuse the loaded lists without another index request. Resource
+invalidations make the next link search wait for fresh data. The shared parser
+retains URLs, visibility and published dates for the toolbar's link decorations.
+
+Saving the post being edited never reads the lists again, since each one is
+every post, page or tag on the site. Each save writes the post as the server
+answered it into the loaded lists instead: its entry moves to the front of the
+posts or pages list, and any of its tags the tags list lacks, such as one the
+save created, is added to the front of that one. This happens as each save is
+answered, including one that lands after the writer has left the editor. A list
+whose read is still in flight when a save lands, its first included, gets the
+save once that read lands, since the read may predate it; the read itself is
+neither cancelled nor repeated.
+
 ## Snippets
 
 `use-post-snippets.tsx` gives Koenig's card menu every snippet on the site,
@@ -147,6 +278,29 @@ always store that: some hold it encoded twice, and some only have mobiledoc.
 `toSnippetValue()` in `snippet-value.ts` unwraps the first and converts the
 second when the list is read, without writing anything back, so a snippet the
 editor cannot convert to any content is left out of the menu.
+
+## Email size
+
+Inboxes clip an email of 100kB or more behind a "View entire message" link, so
+the editor estimates the size of the newsletter a post would be sent as and
+warns once it reaches that size: as an icon beside the word count that gives
+the size when clicked or tapped, in the publish flow's options while it will send an email, and
+above the email preview.
+
+The estimate starts from the email preview endpoint, read without a newsletter
+or audience, and measures its HTML in bytes. Every link between the post content
+markers that starts with `http://`, `https://` or `/` is then counted at the
+length the send rewrites it to for click tracking, the site URL plus 50
+characters; replacement tokens and `#` are left alone. `estimateEmailSize()` is
+that calculation.
+
+Only a saved post that could still go out as a newsletter is checked: not a page,
+not a published post, not one with an email record or marked email-only, and
+not when the site has newsletters turned off in its default recipients. There is
+no role gate. The version the editor opens with is estimated at once, and each
+later saved version about 500ms after it loads; every version is estimated once,
+in a cache entry of its own that the three places share. A failed estimate shows no
+warning.
 
 ## Adding a settings section
 
@@ -180,8 +334,11 @@ they follow the conventions in
 [the acceptance tier README](../../test-utils/acceptance/README.md). What is
 specific to the editor lives in `apps/admin/test-utils/acceptance/editor.ts`:
 
-- `fakeEditorChrome()` serves the supporting reads the header and the card
-  configuration make, so a spec never mentions them.
+- `fakeEditorChrome()` serves the supporting reads the header, the card
+  configuration and the email size check make, so a spec never mentions them.
+- `fakeEmailPreview(bytes)` serves every post's email at a given size; a later
+  call replaces the earlier one, which is how a spec changes the size between
+  saves.
 - `fakeEditorPost(overrides, normalize)` serves one post: later reads return what
   earlier saves sent, each save advances the collision token, and the capture it
   returns is what a spec asserts writes against. `normalize` stands in for a
@@ -189,9 +346,10 @@ specific to the editor lives in `apps/admin/test-utils/acceptance/editor.ts`:
 - `submittedPost(capture, index)` reads the fields of a captured save, the most
   recent one by default.
 - `editorReadLanded(queryClient, version)` resolves once a read of `version` at
-  its `updated_at` is in the query cache and the editor has handled it, which is
-  the only sign of a read the editor refuses. `renderAdminApp` resolves with the
-  `queryClient`.
+  its `updated_at` has landed in the query cache and the editor has handled it,
+  which is the only sign of a read the editor refuses. The copy a save writes
+  into the cache does not count while the read after that save is in flight.
+  `renderAdminApp` resolves with the `queryClient`.
 - `fakeUnsplashPhotos()` serves one photo in the shape the picker lays out and
   inserts, and `UNSPLASH_PICKED` is the rendition the picker asks for.
 
